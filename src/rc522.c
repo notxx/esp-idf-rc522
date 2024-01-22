@@ -6,6 +6,8 @@
 
 #include "rc522.h"
 #include "rc522_registers.h"
+#include "rc522_commands.h"
+#include "iso_iec_14443_protocol.h"
 #include "guards.h"
 
 static const char* TAG = "rc522";
@@ -351,11 +353,11 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, uint8_t cmd, uint8_t *da
     uint8_t nn = 0;
     uint8_t tmp;
     
-    if(cmd == 0x0E) {
+    if(cmd == RC522_CMD_AUTHENT) {
         irq = 0x12;
         irq_wait = 0x10;
     }
-    else if(cmd == 0x0C) {
+    else if(cmd == RC522_CMD_TRANSCEIVE) {
         irq = 0x77;
         irq_wait = 0x30;
     }
@@ -367,7 +369,7 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, uint8_t cmd, uint8_t *da
     ESP_ERR_JMP_GUARD(rc522_write_n(rc522, RC522_FIFO_DATA_REG, n, data));
     ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_COMMAND_REG, cmd));
 
-    if(cmd == 0x0C) {
+    if(cmd == RC522_CMD_TRANSCEIVE) {
         ESP_ERR_JMP_GUARD(rc522_set_bitmask(rc522, RC522_BIT_FRAMING_REG, 0x80));
     }
 
@@ -389,7 +391,7 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, uint8_t cmd, uint8_t *da
         ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_ERROR_REG, &tmp));
 
         if((tmp & 0x1B) == 0x00) {
-            if(cmd == 0x0C) {
+            if(cmd == RC522_CMD_TRANSCEIVE) {
                 ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_FIFO_LEVEL_REG, &nn));
                 ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_CONTROL_REG, &tmp));
 
@@ -429,10 +431,10 @@ static esp_err_t rc522_request(rc522_handle_t rc522, uint8_t* res_n, uint8_t** r
     esp_err_t err = ESP_OK;
     uint8_t* _result = NULL;
     uint8_t _res_n = 0;
-    uint8_t req_mode = 0x26;
+    uint8_t req_mode = RC522_REQA;
 
     ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_BIT_FRAMING_REG, 0x07));
-    ESP_ERR_RET_GUARD(rc522_card_write(rc522, 0x0C, &req_mode, 1, &_res_n, &_result));
+    ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, &req_mode, 1, &_res_n, &_result));
 
     if(_res_n * 8 != 0x10) {
         free(_result);
@@ -453,7 +455,7 @@ static esp_err_t rc522_anticoll(rc522_handle_t rc522, uint8_t** result)
     uint8_t _res_n;
 
     ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_BIT_FRAMING_REG, 0x00));
-    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, 0x0C, (uint8_t[]) { 0x93, 0x20 }, 2, &_res_n, &_result));
+    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) { 0x93, 0x20 }, 2, &_res_n, &_result));
 
     // TODO: Some cards have length of 4, and some of them have length of 7 bytes
     //       here we are using one extra byte which is not part of UID.

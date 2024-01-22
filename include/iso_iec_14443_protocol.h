@@ -11,3 +11,4 @@
 #define RC522_ANTICOLLISION_CMD   0x93
 #define RC522_SELECT_CMD          0x93
 #define RC522_WRITE_CMD           0xA0
+#define RC522_CASCADE_TAG         0x20

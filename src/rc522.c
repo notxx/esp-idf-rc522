@@ -455,7 +455,7 @@ static esp_err_t rc522_anticoll(rc522_handle_t rc522, uint8_t** result)
     uint8_t _res_n;
 
     ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_BIT_FRAMING_REG, 0x00));
-    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) { 0x93, 0x20 }, 2, &_res_n, &_result));
+    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) { RC522_ANTICOLLISION_CMD, RC522_CASCADE_TAG }, 2, &_res_n, &_result));
 
     // TODO: Some cards have length of 4, and some of them have length of 7 bytes
     //       here we are using one extra byte which is not part of UID.

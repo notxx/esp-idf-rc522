@@ -39,4 +39,10 @@
    - Read the response from the card to ensure successful data writing.
 
 8. Disable the Antenna (optional)
+
+# Relevant documentation
+- MFRC522 documentation: https://www.nxp.com/docs/en/data-sheet/MFRC522.pdf
+- PICC MIFARE Classic 1K - Mainstream contactless smart card IC documentation: https://www.mouser.com/datasheet/2/302/MF1S503x-89574.pdf
+- MIFARE Type Identification: https://www.nxp.com/docs/en/application-note/AN10833.pdf
+- MIFARE ISO/IEC 14443 PICC selection documentation: https://www.nxp.com/docs/en/application-note/AN10834.pdf
    - Set the Tx and Rx registers to disable the antenna.

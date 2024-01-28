@@ -19,6 +19,12 @@ extern "C" {
 
 ESP_EVENT_DECLARE_BASE(RC522_EVENTS);
 
+// A struct used for passing a MIFARE Crypto1 key
+typedef struct {
+    uint8_t		keyByte[6]; // A Mifare Crypto1 key is 6 bytes
+} MIFARE_Key;
+
+
 typedef struct rc522* rc522_handle_t;
 
 typedef enum {

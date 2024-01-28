@@ -32,6 +32,7 @@ struct rc522 {
     bool initialized;                      /*<! Set on the first start() when configuration is sent to rc522 */
     bool scanning;                         /*<! Whether the rc522 is in scanning or idle mode */
     bool tag_was_present_last_time;
+    uint8_t* tag_uid; 
     bool bus_initialized_by_user;          /*<! Whether the bus has been initialized manually by the user, before calling rc522_create function */
 };
 
@@ -319,7 +320,7 @@ static esp_err_t rc522_calculate_crc(rc522_handle_t rc522, uint8_t *data, uint8_
     ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_DIV_INT_REQ_REG, 0x04));
     ESP_ERR_RET_GUARD(rc522_set_bitmask(rc522, RC522_FIFO_LEVEL_REG, 0x80));
     ESP_ERR_RET_GUARD(rc522_write_n(rc522, RC522_FIFO_DATA_REG, n, data));
-    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_COMMAND_REG, 0x03));
+    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_COMMAND_REG, RC522_CMD_CALC_CRC));
 
     for(;;) {
         ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_DIV_INT_REQ_REG, &nn));
@@ -365,7 +366,7 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, uint8_t cmd, uint8_t *da
     ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_COMM_INT_EN_REG, irq | 0x80));
     ESP_ERR_JMP_GUARD(rc522_clear_bitmask(rc522, RC522_COMM_INT_REQ_REG, 0x80));
     ESP_ERR_JMP_GUARD(rc522_set_bitmask(rc522, RC522_FIFO_LEVEL_REG, 0x80));
-    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_COMMAND_REG, 0x00));
+    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_COMMAND_REG, RC522_CMD_IDLE));
     ESP_ERR_JMP_GUARD(rc522_write_n(rc522, RC522_FIFO_DATA_REG, n, data));
     ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_COMMAND_REG, cmd));
 
@@ -431,7 +432,7 @@ static esp_err_t rc522_request(rc522_handle_t rc522, uint8_t* res_n, uint8_t** r
     esp_err_t err = ESP_OK;
     uint8_t* _result = NULL;
     uint8_t _res_n = 0;
-    uint8_t req_mode = RC522_REQA;
+    uint8_t req_mode = MIFARE_REQA;
 
     ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_BIT_FRAMING_REG, 0x07));
     ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, &req_mode, 1, &_res_n, &_result));
@@ -455,7 +456,7 @@ static esp_err_t rc522_anticoll(rc522_handle_t rc522, uint8_t** result)
     uint8_t _res_n;
 
     ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_BIT_FRAMING_REG, 0x00));
-    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) { RC522_ANTICOLLISION_CMD, RC522_CASCADE_TAG }, 2, &_res_n, &_result));
+    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) MIFARE_ANTICOLLISION_CL_1, 2, &_res_n, &_result));
 
     // TODO: Some cards have length of 4, and some of them have length of 7 bytes
     //       here we are using one extra byte which is not part of UID.
@@ -489,9 +490,11 @@ static esp_err_t rc522_get_tag(rc522_handle_t rc522, uint8_t** result)
         ESP_ERR_JMP_GUARD(rc522_anticoll(rc522, &_result));
 
         if(_result != NULL) {
-            uint8_t buf[] = { 0x50, 0x00, 0x00, 0x00 };
+            uint8_t buf[4];
+            memcpy(buf, (uint8_t[])MIFARE_HALT, 2);
+            memcpy(buf + 2, (uint8_t[]){ 0x00, 0x00 }, 2);
             ESP_ERR_JMP_GUARD(rc522_calculate_crc(rc522, buf, 2, buf + 2));
-            ESP_ERR_JMP_GUARD(rc522_card_write(rc522, 0x0C, buf, 4, &res_data_n, &res_data));
+            ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, buf, 4, &res_data_n, &res_data));
             FREE(res_data);
             ESP_ERR_JMP_GUARD(rc522_clear_bitmask(rc522, RC522_STATUS_2_REG, 0x08));
         }
@@ -502,6 +505,31 @@ static esp_err_t rc522_get_tag(rc522_handle_t rc522, uint8_t** result)
         FREE(res_data);
     }, {
         *result = _result;
+    });
+
+    return err;
+}
+
+
+static esp_err_t rc522_authenticate(rc522_handle_t rc522, uint8_t command, uint8_t blockAddr, MIFARE_Key* key)
+{
+    esp_err_t err = ESP_OK;
+    uint8_t* res_data = NULL;
+    uint8_t res_data_n;
+
+    uint8_t buf[12];
+    buf[0] = command;
+    buf[1] = blockAddr;
+    memcpy(buf + 2, key, 6);
+    memcpy(buf + 8, rc522->tag_uid, 4);
+
+    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_BIT_FRAMING_REG, 0x00));
+    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_AUTHENT, buf, 12, &res_data_n, &res_data));
+
+    JMP_GUARD_GATES({
+        FREE(res_data);
+    }, {
+        // Nothing to do if the authentication worked
     });
 
     return err;
@@ -551,7 +579,7 @@ esp_err_t rc522_start(rc522_handle_t rc522)
         }
         // ------- End of RW test --------
 
-        ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_COMMAND_REG, 0x0F));
+        ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_COMMAND_REG, RC522_CMD_SOFTRESET));
         ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_TIMER_MODE_REG, 0x8D));
         ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_TIMER_PRESCALER_REG, 0x3E));
         ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_TIMER_RELOAD_LSB_REG, 0x1E));
@@ -755,12 +783,26 @@ static void rc522_task(void* arg)
         if(! serial_no_array) {
             rc522->tag_was_present_last_time = false;
         } else if(! rc522->tag_was_present_last_time) {
+            rc522->tag_uid = (uint8_t*) malloc(32);
+            memcpy(rc522->tag_uid, serial_no_array, 32);
             rc522_tag_t tag = {
                 .serial_number = rc522_sn_to_u64(serial_no_array),
             };
             FREE(serial_no_array);
             rc522_dispatch_event(rc522, RC522_EVENT_TAG_SCANNED, &tag);
             rc522->tag_was_present_last_time = true;
+
+            // TEST AUTHENTICATION
+            MIFARE_Key key;
+            // All keys are set to FFFFFFFFFFFFh at chip delivery from the factory.
+			for (uint8_t i = 0; i < 6; i++) {
+				key.keyByte[i] = 0xFF;
+			}
+            if (rc522_authenticate(rc522, MIFARE_AUTH_KEY_A, 15, &key) == ESP_OK) {
+                ESP_LOGI(TAG, "Authentication to sector %d succeded", 15);          // prints a INFO message
+            } else {
+                ESP_LOGE(TAG, "Authentication failed");
+            }
         } else {
             FREE(serial_no_array);
         }

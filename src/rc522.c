@@ -476,6 +476,36 @@ static esp_err_t rc522_anticoll(rc522_handle_t rc522, uint8_t** result)
     return err;
 }
 
+static esp_err_t rc522_stop_picc_communication(rc522_handle_t rc522)
+{
+
+    esp_err_t err = ESP_OK;
+    /*
+        This part stops the communication with the picc by issuing a HALT_A as well as STOP_CRYPTO1
+    */
+    uint8_t* res_data = NULL;
+    uint8_t res_data_n;
+
+    // Issue a HALT_A
+    uint8_t buf[4];
+    memcpy(buf, (uint8_t[])MIFARE_HALT, 2);
+    memcpy(buf + 2, (uint8_t[]){ 0x00, 0x00 }, 2);
+    ESP_ERR_JMP_GUARD(rc522_calculate_crc(rc522, buf, 2, buf + 2));
+    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, buf, 4, &res_data_n, &res_data));
+    FREE(res_data);
+    // Stop CYPTO1
+    // Clear MFCrypto1On bit
+    ESP_ERR_JMP_GUARD(rc522_clear_bitmask(rc522, RC522_STATUS_2_REG, 0x08));
+
+    JMP_GUARD_GATES({
+        FREE(res_data);
+    }, {
+        // Nothing to do if everything went fine
+    });
+
+    return err;
+}
+
 static esp_err_t rc522_get_tag(rc522_handle_t rc522, uint8_t** result)
 {
     esp_err_t err = ESP_OK;
@@ -490,13 +520,7 @@ static esp_err_t rc522_get_tag(rc522_handle_t rc522, uint8_t** result)
         ESP_ERR_JMP_GUARD(rc522_anticoll(rc522, &_result));
 
         if(_result != NULL) {
-            uint8_t buf[4];
-            memcpy(buf, (uint8_t[])MIFARE_HALT, 2);
-            memcpy(buf + 2, (uint8_t[]){ 0x00, 0x00 }, 2);
-            ESP_ERR_JMP_GUARD(rc522_calculate_crc(rc522, buf, 2, buf + 2));
-            ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, buf, 4, &res_data_n, &res_data));
-            FREE(res_data);
-            ESP_ERR_JMP_GUARD(rc522_clear_bitmask(rc522, RC522_STATUS_2_REG, 0x08));
+            ESP_ERR_JMP_GUARD(rc522_stop_picc_communication(rc522));
         }
     }
 
@@ -511,16 +535,16 @@ static esp_err_t rc522_get_tag(rc522_handle_t rc522, uint8_t** result)
 }
 
 
-static esp_err_t rc522_authenticate(rc522_handle_t rc522, uint8_t command, uint8_t blockAddr, MIFARE_Key* key)
+static esp_err_t rc522_authenticate(rc522_handle_t rc522, uint8_t auth_key, uint8_t blockAddr, MIFARE_Key* key)
 {
     esp_err_t err = ESP_OK;
     uint8_t* res_data = NULL;
     uint8_t res_data_n;
 
     uint8_t buf[12];
-    buf[0] = command;
+    buf[0] = auth_key;
     buf[1] = blockAddr;
-    memcpy(buf + 2, key, 6);
+    memcpy(buf + 2, key->keyByte, 6);
     memcpy(buf + 8, rc522->tag_uid, 4);
 
     ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_BIT_FRAMING_REG, 0x00));
@@ -532,6 +556,185 @@ static esp_err_t rc522_authenticate(rc522_handle_t rc522, uint8_t command, uint8
         // Nothing to do if the authentication worked
     });
 
+    return err;
+}
+
+
+static esp_err_t  rc522_read_block_from_picc(rc522_handle_t rc522, uint8_t blockAddr,
+											uint8_t *buffer,		///< The buffer to store the data in
+											uint8_t *bufferSize	///< Buffer size, at least 18 bytes. Also number of bytes returned if STATUS_OK.
+										) {
+    esp_err_t err = ESP_OK;
+
+    // Sanity checks
+    CONDITION_LOG_AND_JMP_GUARD((buffer == NULL), "The buffer pointer is null, PICC's block cannot be read");
+    CONDITION_LOG_AND_JMP_GUARD((*bufferSize < 18), "The buffer reading a block from the PICC is small, increase the size to atleast 18 bytes");
+
+	// Build command buffer
+	buffer[0] = MIFARE_READ;
+	buffer[1] = blockAddr;
+	// Calculate CRC_A
+    ESP_ERR_JMP_GUARD(rc522_calculate_crc(rc522, buffer, 2, buffer + 2));
+
+    // Transmit the buffer and receive the response, validate CRC_A.
+    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, buffer, 4, bufferSize, &buffer));
+
+	JMP_GUARD_GATES({
+        FREE(buffer);
+        *bufferSize = 0;
+    }, {
+        // Nothing to do if everything went fine
+    });
+
+    return err;
+}
+
+static esp_err_t rc522_read_sector_from_picc(rc522_handle_t rc522, MIFARE_Key* key, uint8_t sector)
+{
+    esp_err_t err = ESP_OK;
+
+    uint8_t no_of_blocks = 4; // Number of blocks in sector, 4 in MIFARE cards
+    uint8_t firstBlock = sector * no_of_blocks; // Adress of first block of a sector, we will always read 5 sectors (MIFARE_MINI): 0, 4, 8, 12, 16
+
+	// The access bits are stored in a peculiar fashion.
+	// There are four groups:
+	//		g[3]	Access bits for the sector trailer, block 3 (for sectors 0-31) or block 15 (for sectors 32-39)
+	//		g[2]	Access bits for block 2 (for sectors 0-31) or blocks 10-14 (for sectors 32-39)
+	//		g[1]	Access bits for block 1 (for sectors 0-31) or blocks 5-9 (for sectors 32-39)
+	//		g[0]	Access bits for block 0 (for sectors 0-31) or blocks 0-4 (for sectors 32-39)
+	// Each group has access bits [C1 C2 C3]. In this code C1 is MSB and C3 is LSB.
+	// The four CX bits are stored together in a nible cx and an inverted nible cx_.
+	uint8_t c1, c2, c3;		// Nibbles
+	uint8_t c1_, c2_, c3_;		// Inverted nibbles
+
+	uint8_t g[4];				// Access bits for each of the four groups.
+	uint8_t group;				// 0-3 - active group for access bits
+	bool firstInGroup;		// True for the first block dumped in the group
+	
+
+    // Dump blocks, highest address first.
+	uint8_t byteCount;
+	uint8_t buffer[18];
+	uint8_t blockAddr;
+	bool isSectorTrailer = true;
+	bool invertedError = false;	// Avoid "unused variable" warning.
+
+    for (int8_t blockOffset = no_of_blocks - 1; blockOffset >= 0; blockOffset--) {
+		blockAddr = firstBlock + blockOffset;
+        // Sector number - only on first line
+        if (isSectorTrailer) {
+			printf("  "); // Pad with spaces
+			printf("%d", sector);
+			printf("   ");
+		} else {
+            printf("       ");
+        }
+        
+        // Block number
+		if(blockAddr < 10)
+			printf("   "); // Pad with spaces
+		else {
+			printf("  "); // Pad with spaces
+		}
+		printf("%d", blockAddr);
+		printf("  ");
+        // Establish encrypted communications before reading the first block
+		if (isSectorTrailer) {
+			ESP_ERR_JMP_GUARD(rc522_authenticate(rc522, MIFARE_AUTH_KEY_A, firstBlock, key));
+		}
+        // Read block
+		byteCount = sizeof(buffer);
+		ESP_ERR_JMP_GUARD(rc522_read_block_from_picc(rc522, blockAddr, buffer, &byteCount));
+		// Dump data
+		for (uint8_t index = 0; index < 16; index++) {
+			if(buffer[index] < 0x10)
+				printf(" 0");
+			else
+				printf(" ");
+			printf("0x%02x", buffer[index]);
+			if ((index % 4) == 3) {
+				printf(" ");
+			}
+		}
+        // Parse sector trailer data
+		if (isSectorTrailer) {
+            printf(" << SECTOR TRAILER >> ");
+			c1  = buffer[7] >> 4;
+			c2  = buffer[8] & 0xF;
+			c3  = buffer[8] >> 4;
+			c1_ = buffer[6] & 0xF;
+			c2_ = buffer[6] >> 4;
+			c3_ = buffer[7] & 0xF;
+			invertedError = (c1 != (~c1_ & 0xF)) || (c2 != (~c2_ & 0xF)) || (c3 != (~c3_ & 0xF));
+			g[0] = ((c1 & 1) << 2) | ((c2 & 1) << 1) | ((c3 & 1) << 0);
+			g[1] = ((c1 & 2) << 1) | ((c2 & 2) << 0) | ((c3 & 2) >> 1);
+			g[2] = ((c1 & 4) << 0) | ((c2 & 4) >> 1) | ((c3 & 4) >> 2);
+			g[3] = ((c1 & 8) >> 1) | ((c2 & 8) >> 2) | ((c3 & 8) >> 3);
+			isSectorTrailer = false;
+		}
+		
+		// Which access group is this block in?
+		if (no_of_blocks == 4) {
+			group = blockOffset;
+			firstInGroup = true;
+		}
+		else {
+			group = blockOffset / 5;
+			firstInGroup = (group == 3) || (group != (blockOffset + 1) / 5);
+		}
+		
+		if (firstInGroup) {
+			// Print access bits
+			printf(" [ ");
+		    printf("%d", (g[group] >> 2) & 1); printf(" ");
+			printf("%d", (g[group] >> 1) & 1); printf(" ");
+			printf("%d", (g[group] >> 0) & 1);
+			printf(" ] ");
+			if (invertedError) {
+				ESP_LOGW(TAG, " Inverted access bits did not match! ");
+			}
+		}
+		
+		if (group != 3 && (g[group] == 1 || g[group] == 6)) { // Not a sector trailer, a value block
+			int32_t value = ((int32_t)(buffer[3])<<24) | ((int32_t)(buffer[2])<<16) | ((int32_t)(buffer[1])<<8) | ((int32_t)(buffer[0]));
+			printf(" Value=0x%lx", value);
+			printf(" Adr=0x%02x", buffer[12]);
+		}
+		printf("\n");
+    }
+
+    JMP_GUARD_GATES({
+        // TODO
+    }, {
+        // Nothing to do if everything went fine
+    });
+    
+    return err;
+}
+
+static esp_err_t rc522_read_data_from_picc(rc522_handle_t rc522, MIFARE_Key* key)
+{
+    esp_err_t err = ESP_OK;
+    
+    // For the sake of simplicity we will treat all PICCs as MIFARE_MINI
+    // Has 5 sectors * 4 blocks/sector * 16 bytes/block = 320 bytes.
+    // For now, even if we read/write for other type of PICC, we will use only 320 bytes.
+    uint8_t no_of_sectors = 5;
+
+    // 5 sectors are available for read/write
+    ESP_LOGI(TAG, "Sector Block   0  1  2  3   4  5  6  7   8  9 10 11  12 13 14 15  AccessBits");
+    for (int8_t i = no_of_sectors - 1; i >= 0; i--) {
+        ESP_ERR_JMP_GUARD(rc522_read_sector_from_picc(rc522, key, i));
+    }
+    
+    ESP_ERR_JMP_GUARD(rc522_stop_picc_communication(rc522));
+
+    JMP_GUARD_GATES({
+        // TODO
+    }, {
+        // Nothing to do if everything went fine
+    });
+    
     return err;
 }
 
@@ -796,13 +999,9 @@ static void rc522_task(void* arg)
             MIFARE_Key key;
             // All keys are set to FFFFFFFFFFFFh at chip delivery from the factory.
 			for (uint8_t i = 0; i < 6; i++) {
-				key.keyByte[i] = 0xFF;
+				key.keyByte[i] = 0xff;
 			}
-            if (rc522_authenticate(rc522, MIFARE_AUTH_KEY_A, 15, &key) == ESP_OK) {
-                ESP_LOGI(TAG, "Authentication to sector %d succeded", 15);          // prints a INFO message
-            } else {
-                ESP_LOGE(TAG, "Authentication failed");
-            }
+            rc522_read_data_from_picc(rc522, &key);
         } else {
             FREE(serial_no_array);
         }

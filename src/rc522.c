@@ -427,12 +427,11 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, uint8_t cmd, uint8_t *da
     return err;
 }
 
-static esp_err_t rc522_request(rc522_handle_t rc522, uint8_t* res_n, uint8_t** result)
+static esp_err_t rc522_request(rc522_handle_t rc522, uint8_t req_mode, uint8_t* res_n, uint8_t** result)
 {
     esp_err_t err = ESP_OK;
     uint8_t* _result = NULL;
     uint8_t _res_n = 0;
-    uint8_t req_mode = MIFARE_REQA;
 
     ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_BIT_FRAMING_REG, 0x07));
     ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, &req_mode, 1, &_res_n, &_result));
@@ -448,6 +447,57 @@ static esp_err_t rc522_request(rc522_handle_t rc522, uint8_t* res_n, uint8_t** r
 
     return err;
 }
+
+static esp_err_t rc522_select(rc522_handle_t rc522)
+{
+    esp_err_t err = ESP_OK;
+    uint8_t* _result = NULL;
+    uint8_t _res_n;
+
+    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_BIT_FRAMING_REG, 0x00));
+    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) MIFARE_SELECT_CL_1, 2, &_res_n, &_result));
+
+    printf("#### SAK ? length %d, first byte \n", _res_n);
+
+
+    JMP_GUARD_GATES({
+        FREE(_result);
+        _res_n = 0;
+    }, {
+        
+    });
+
+    return err;
+}
+
+static esp_err_t rc522_picc_wakeup(rc522_handle_t rc522)
+{
+    esp_err_t err = ESP_OK;
+
+    uint8_t* res_data = NULL;
+    uint8_t res_data_n;
+
+    ESP_ERR_JMP_GUARD(rc522_request(rc522, MIFARE_WUPA, &res_data_n, &res_data));
+
+    if(res_data_n != 2 || (res_data_n == 2 && (res_data[1] != 0x00 || res_data[0] != 0x04))) {
+        err = ESP_ERR_INVALID_STATE; 
+        FREE(res_data);
+        res_data_n = 0;
+    } else {
+        printf(" >> Wakeup  0x%02x%02x \n", res_data[1], res_data[0]);
+    }
+    
+    JMP_GUARD_GATES({
+        FREE(res_data);
+        res_data_n = 0;
+    }, {
+        FREE(res_data);
+        res_data_n = 0;
+    });
+
+    return err;
+}
+
 
 static esp_err_t rc522_anticoll(rc522_handle_t rc522, uint8_t** result)
 {
@@ -465,6 +515,8 @@ static esp_err_t rc522_anticoll(rc522_handle_t rc522, uint8_t** result)
     if(_result && _res_n != 5) { // all cards/tags serial numbers is 5 bytes long (??)
         ESP_ERR_LOG_AND_JMP_GUARD(ESP_ERR_INVALID_RESPONSE, "invalid length of serial number");
     }
+
+    printf("#### First byte is Cascade TAG 0x88 ? 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x) \n", _result[0], _result[1], _result[2], _result[3], _result[4]);
 
     JMP_GUARD_GATES({
         FREE(_result);
@@ -513,7 +565,7 @@ static esp_err_t rc522_get_tag(rc522_handle_t rc522, uint8_t** result)
     uint8_t* res_data = NULL;
     uint8_t res_data_n;
 
-    ESP_ERR_JMP_GUARD(rc522_request(rc522, &res_data_n, &res_data));
+    ESP_ERR_JMP_GUARD(rc522_request(rc522, MIFARE_REQA, &res_data_n, &res_data));
 
     if(res_data != NULL) {
         FREE(res_data);
@@ -577,6 +629,7 @@ static esp_err_t  rc522_read_block_from_picc(rc522_handle_t rc522, uint8_t block
     ESP_ERR_JMP_GUARD(rc522_calculate_crc(rc522, buffer, 2, buffer + 2));
 
     // Transmit the buffer and receive the response, validate CRC_A.
+    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_BIT_FRAMING_REG, 0x00));
     ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, buffer, 4, bufferSize, &buffer));
 
 	JMP_GUARD_GATES({
@@ -640,11 +693,25 @@ static esp_err_t rc522_read_sector_from_picc(rc522_handle_t rc522, MIFARE_Key* k
 		printf("  ");
         // Establish encrypted communications before reading the first block
 		if (isSectorTrailer) {
-			ESP_ERR_JMP_GUARD(rc522_authenticate(rc522, MIFARE_AUTH_KEY_A, firstBlock, key));
+            uint8_t* res_data = NULL;
+            uint8_t res_data_n;
+            ESP_ERR_JMP_GUARD(rc522_request(rc522, MIFARE_WUPA, &res_data_n, &res_data));
+            if(res_data != NULL) {
+                ESP_ERR_JMP_GUARD(rc522_authenticate(rc522, MIFARE_AUTH_KEY_A, firstBlock, key));
+            }
+            FREE(res_data);
+            res_data_n = 0;
 		}
         // Read block
 		byteCount = sizeof(buffer);
-		ESP_ERR_JMP_GUARD(rc522_read_block_from_picc(rc522, blockAddr, buffer, &byteCount));
+        uint8_t* res_data = NULL;
+        uint8_t res_data_n;
+        ESP_ERR_JMP_GUARD(rc522_request(rc522, MIFARE_WUPA, &res_data_n, &res_data));
+        if(res_data != NULL) {
+		    ESP_ERR_JMP_GUARD(rc522_read_block_from_picc(rc522, blockAddr, buffer, &byteCount));
+        }
+        FREE(res_data);
+        res_data_n = 0;
 		// Dump data
 		for (uint8_t index = 0; index < 16; index++) {
 			if(buffer[index] < 0x10)

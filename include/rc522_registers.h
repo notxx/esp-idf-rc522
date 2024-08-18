@@ -1,72 +1,52 @@
 #pragma once
 
-// Starts and stops command execution
-#define RC522_COMMAND_REG 0x01
-
-// Communication Interrupt Enable Register.
-// Control bits to enable and disable the passing of interrupt requests
-#define RC522_COMM_INT_EN_REG 0x02
-
-// Diverted Interrupt Enable Register.
-// Control bits to enable and disable the passing of interrupt requests
-#define RC522_DIV_INT_EN_REG 0x03
-
-// Communication Interrupt request bits
-#define RC522_COMM_INT_REQ_REG 0x04
-
-// Diverted Interrupt request bits
-#define RC522_DIV_INT_REQ_REG 0x05
-
-// Error bits showing the error status of the last command  executed
-#define RC522_ERROR_REG 0x06
-
-// Contains status bits of the receiver, transmitter and data mode detector
-#define RC522_STATUS_2_REG 0x08
-
-// Shows the MFRC522 software version
-#define RC522_VERSION_REG 0x37
-
-// Controls the logical behavior of the antenna driver pins TX1 and TX2
-#define RC522_TX_CONTROL_REG 0x14
-
-// Configures the receiver gain
-#define RC522_RF_CFG_REG 0x26
-
-// Input and output of 64 byte FIFO buffer
-#define RC522_FIFO_DATA_REG 0x09
-
-// Number of bytes stored in the FIFO buffer
-#define RC522_FIFO_LEVEL_REG 0x0A
-
-// Miscellaneous control register
-#define RC522_CONTROL_REG 0x0C
-
-// Adjustments for bit-oriented frames
-#define RC522_BIT_FRAMING_REG 0x0D
-
-// MSB (higher bits) values of the CRC calculation
-#define RC522_CRC_RESULT_MSB_REG 0x21
-
-// LSB (lower bits) values of the CRC calculation
-#define RC522_CRC_RESULT_LSB_REG 0x22
-
-// Sets the modulation width
-#define RC522_MOD_WIDTH_REG 0x24
-
-// Defines the mode of the timer
-#define RC522_TIMER_MODE_REG 0x2A
-
-// Defines the timer prescaler settings
-#define RC522_TIMER_PRESCALER_REG 0x2B
-
-// MSB (higher bits) value of 16-bit timer reload value
-#define RC522_TIMER_RELOAD_MSB_REG 0x2C
-
-// LSB (lower bits) value of 16-bit timer reload value
-#define RC522_TIMER_RELOAD_LSB_REG 0x2D
-
-// Defines general modes for transmitting and receiving
-#define RC522_MODE_REG 0x11
-
-// Controls the setting of the transmission modulation
-#define RC522_TX_ASK_REG 0x15
+typedef enum rc522_reg {
+    // Starts and stops command execution
+    RC522_REG_COMMAND =             0x01,
+    // Communication Interrupt Enable Register.
+    // Control bits to enable and disable the passing of interrupt requests
+    RC522_REG_COMM_IRQ_EN =         0x02,
+    // Diverted Interrupt Enable Register.
+    // Control bits to enable and disable the passing of interrupt requests
+    RC522_REG_DIV_IRQ_EN =          0x03,
+    // Communication Interrupt request bits
+    RC522_REG_COMM_IRQ_REQ =        0x04,
+    // Diverted Interrupt request bits
+    RC522_REG_DIV_IRQ_REQ =         0x05,
+    // Error bits showing the error status of the last command  executed
+    RC522_REG_ERROR =               0x06,
+    // Contains status bits of the receiver, transmitter and data mode detector
+    RC522_REG_STATUS_2 =             0x08,
+    // Input and output of 64 byte FIFO buffer
+    RC522_REG_FIFO_DATA =           0x09,
+    // Number of bytes stored in the FIFO buffer
+    RC522_REG_FIFO_LEVEL =          0x0A,
+    // Miscellaneous control register
+    RC522_REG_CONTROL =             0x0C,
+    // Adjustments for bit-oriented frames
+    RC522_REG_BIT_FRAMING =         0x0D,
+    // Defines general modes for transmitting and receiving
+    RC522_REG_MODE =                0x11,
+    // Controls the logical behavior of the antenna driver pins TX1 and TX2
+    RC522_REG_TX_CONTROL =          0x14,
+    // Controls the setting of the transmission modulation
+    RC522_REG_TX_ASK =              0x15,
+    // MSB (higher bits) values of the CRC calculation
+    RC522_REG_CRC_RESULT_MSB =      0x21,
+    // LSB (lower bits) values of the CRC calculation
+    RC522_REG_CRC_RESULT_LSB =      0x22,
+    // Sets the modulation width
+    RC522_REG_MOD_WIDTH =           0x24,
+    // Configures the receiver gain
+    RC522_REG_RF_CFG =              0x26,
+    // Defines the mode of the timer
+    RC522_REG_TIMER_MODE =          0x2A,
+    // Defines the timer prescaler settings
+    RC522_REG_TIMER_PRESCALER =     0x2B,
+    // MSB (higher bits) value of 16-bit timer reload value
+    RC522_REG_TIMER_RELOAD_MSB =    0x2C,
+    // LSB (lower bits) value of 16-bit timer reload value
+    RC522_REG_TIMER_RELOAD_LSB =    0x2D,
+    // Shows the MFRC522 software version
+    RC522_REG_VERSION =             0x37,
+} rc522_reg_t;

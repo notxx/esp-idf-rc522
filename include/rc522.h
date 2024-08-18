@@ -25,7 +25,7 @@ typedef struct {
 } MIFARE_Key;
 
 
-typedef struct rc522* rc522_handle_t;
+typedef struct rc522 * rc522_handle_t;
 
 typedef enum {
     RC522_TRANSPORT_SPI,
@@ -40,10 +40,10 @@ typedef struct {
     union {
         struct {
             spi_host_device_t host;
-            int miso_gpio;
-            int mosi_gpio;
-            int sck_gpio;
-            int sda_gpio;
+            gpio_num_t miso;
+            gpio_num_t mosi;
+            gpio_num_t sclk;
+            gpio_num_t cs;
             int clock_speed_hz;
             uint32_t device_flags;     /*<! Bitwise OR of SPI_DEVICE_* flags */
             /**
@@ -56,8 +56,8 @@ typedef struct {
         } spi;
         struct {
             i2c_port_t port;
-            int sda_gpio;
-            int scl_gpio;
+            gpio_num_t sda;
+            gpio_num_t scl;
             int rw_timeout_ms;
             uint32_t clock_speed_hz;
         } i2c;
@@ -80,13 +80,16 @@ typedef struct {
 } rc522_tag_t;
 
 /**
- * @brief Create RC522 scanner handle.
- *        To start scanning tags call the rc522_start function.
- * @param config Configuration
- * @param out_rc522 Pointer to resulting new handle
- * @return ESP_OK on success
+ * 初始化RC522 RFID模块。
+ * 
+ * 该函数负责根据提供的配置参数初始化RC522模块，包括配置复制、传输层创建、事件循环创建和任务创建。
+ * 如果初始化成功，RC522模块将准备好进行进一步的操作。
+ * 
+ * @param config 指向RC522配置参数的指针。不能为空。
+ * @param out_rc522 指向一个变量的指针，该变量将接收RC522模块的句柄。不能为空。
+ * @return 返回初始化操作的结果，如果返回ESP_OK表示成功，其他值表示失败。
  */
-esp_err_t rc522_create(rc522_config_t* config, rc522_handle_t* out_rc522);
+esp_err_t rc522_create(const rc522_config_t * config, rc522_handle_t* out_rc522);
 
 esp_err_t rc522_register_events(rc522_handle_t rc522, rc522_event_t event, esp_event_handler_t event_handler, void* event_handler_arg);
 

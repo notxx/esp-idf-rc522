@@ -10,7 +10,9 @@
 #include "iso_iec_14443_protocol.h"
 #include "guards.h"
 
-static const char* TAG = "rc522";
+static const char * TAG = "rc522";
+
+#define EVENT_BIT_HARDWARE_READY BIT0
 
 /**
  * @brief Macro for safely freeing memory.
@@ -20,11 +22,11 @@ static const char* TAG = "rc522";
  * @param ptr Pointer to the memory to be freed.
  */
 #define FREE(ptr) \
-    if(ptr) { free(ptr); ptr = NULL; }
+    if (ptr) { free(ptr); ptr = NULL; }
 
 struct rc522 {
     bool running;                          /*<! Indicates whether rc522 task is running or not */
-    rc522_config_t * config;                /*<! Configuration */
+    rc522_config_t config;                /*<! Configuration */
     TaskHandle_t task_handle;              /*<! Handle of task */
     esp_event_loop_handle_t event_handle;  /*<! Handle of event loop */
     spi_device_handle_t spi_handle;
@@ -38,10 +40,10 @@ struct rc522 {
 
 ESP_EVENT_DEFINE_BASE(RC522_EVENTS);
 
-static esp_err_t rc522_spi_send(rc522_handle_t rc522, uint8_t* buffer, uint8_t length);
-static esp_err_t rc522_spi_receive(rc522_handle_t rc522, uint8_t* buffer, uint8_t length, uint8_t addr);
-static esp_err_t rc522_i2c_send(rc522_handle_t rc522, uint8_t* buffer, uint8_t length);
-static esp_err_t rc522_i2c_receive(rc522_handle_t rc522, uint8_t* buffer, uint8_t length, uint8_t addr);
+static esp_err_t rc522_spi_send(rc522_handle_t rc522, uint8_t * buffer, uint8_t length);
+static esp_err_t rc522_spi_receive(rc522_handle_t rc522, uint8_t * buffer, uint8_t length, uint8_t addr);
+static esp_err_t rc522_i2c_send(rc522_handle_t rc522, uint8_t * buffer, uint8_t length);
+static esp_err_t rc522_i2c_receive(rc522_handle_t rc522, uint8_t * buffer, uint8_t length, uint8_t addr);
 
 static void rc522_task(void* arg);
 
@@ -65,7 +67,7 @@ static esp_err_t rc522_send(rc522_handle_t rc522, rc522_reg_t addr, const uint8_
     memcpy(buffer + 1, data, n); // 将数据复制到缓冲区的剩余部分
 
     // 根据RC522模块的配置选择合适的传输方式
-    switch(rc522->config->transport) {
+    switch(rc522->config.transport) {
         case RC522_TRANSPORT_SPI: // 如果使用SPI传输
             err = rc522_spi_send(rc522, buffer, n + 1); // 调用SPI发送函数发送数据
             break;
@@ -116,7 +118,7 @@ static esp_err_t rc522_receive(rc522_handle_t rc522, rc522_reg_t addr, uint8_t *
     esp_err_t err; // 初始化错误码变量
 
     // 根据配置的传输方式，调用相应的接收函数
-    switch(rc522->config->transport) {
+    switch(rc522->config.transport) {
         case RC522_TRANSPORT_SPI:
             err = rc522_spi_receive(rc522, buffer, n, addr);
             break;
@@ -151,106 +153,125 @@ static esp_err_t rc522_set_bitmask(rc522_handle_t rc522, rc522_reg_t addr, uint8
     return rc522_write(rc522, addr, tmp | mask);
 }
 
+/**
+ * @brief RC522寄存器中清除指定位
+ * 
+ * 该函数用于在RC522的指定寄存器中清除指定的位。它首先从寄存器读取当前值，
+ * 然后通过与非操作清除特定的位，最后将修改后的新值写回寄存器。
+ * 
+ * @param rc522 RC522设备的句柄
+ * @param addr 要操作的寄存器地址
+ * @param mask 要清除的位的掩码，即哪些位要清除
+ * @return esp_err_t 返回操作结果，ESP_OK表示成功，其他值表示错误
+ */
 static esp_err_t rc522_clear_bitmask(rc522_handle_t rc522, rc522_reg_t addr, uint8_t mask) {
-    esp_err_t err = ESP_OK;
-    uint8_t tmp;
+    esp_err_t err = ESP_OK; // 初始化错误码为ESP_OK，表示还没有错误发生
+    uint8_t tmp; // 用于存储从寄存器读取的原始值
 
+    // 从RC522的指定寄存器读取当前值，如果读取失败，则直接返回错误码
     ESP_ERR_RET_GUARD(rc522_read(rc522, addr, &tmp));
 
+    // 使用与非操作清除指定的位，并将结果写回寄存器
     return rc522_write(rc522, addr, tmp & ~mask);
 }
 
+/**
+ * @brief 读取RC522模块的固件信息
+ * 
+ * 本函数通过调用rc522_read函数，读取RC522模块的版本寄存器（RC522_REG_VERSION），
+ * 以获取模块的固件信息。结果存储在result参数指向的缓冲区中。
+ * 
+ * @param rc522 RC522模块的句柄，用于标识和操作具体的RC522模块
+ * @param result 用于存储读取的固件信息的缓冲区
+ * @return esp_err_t 表示操作结果，ESP_OK表示成功，其他值表示错误
+ */
 static inline esp_err_t rc522_firmware(rc522_handle_t rc522, uint8_t * result) {
     return rc522_read(rc522, RC522_REG_VERSION, result);
 }
 
+/**
+ * @brief 启动RC522的天线
+ * 
+ * 该函数负责启动RC522射频模块的天线。它首先检查TX控制寄存器是否已配置，
+ * 如果没有，它会设置TX控制寄存器以启用天线。然后，它设置RF配置寄存器以
+ * 设置适当的增益，从而完成天线的启动过程。
+ * 
+ * @param rc522 RC522设备的句柄，用于操作RC522芯片。
+ * @return esp_err_t 返回操作结果，ESP_OK表示成功，其他值表示错误代码。
+ */
 static esp_err_t rc522_antenna_on(rc522_handle_t rc522) {
-    esp_err_t err = ESP_OK;
-    uint8_t tmp;
+    esp_err_t err = ESP_OK; // 初始化错误码为ESP_OK
+    uint8_t tmp; // 用于存储从RC522_REG_TX_CONTROL读取的值
 
+    // 读取RC522的TX控制寄存器的值，用于后续判断是否需要设置位掩码
     ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_TX_CONTROL, &tmp));
 
-    if(~ (tmp & 0x03)) {
+    // 如果TX控制寄存器的低两位没有被设置，则设置位掩码以启用天线
+    if (~(tmp & 0x03)) {
         ESP_ERR_RET_GUARD(rc522_set_bitmask(rc522, RC522_REG_TX_CONTROL, 0x03));
     }
 
-    return rc522_write(rc522, RC522_REG_RF_CFG, 0x60); // 43dB gain
+    // 设置RF配置寄存器以获得43dB的增益，这是启动天线所需的配置
+    return rc522_write(rc522, RC522_REG_RF_CFG, 0x60); // 43db gain
 }
 
 static void config_cpy(rc522_config_t * dst, const rc522_config_t * src) {
-    memcpy(dst, src, sizeof(src));
+    memcpy(dst, src, sizeof(rc522_config_t));
     // defaults
     dst->scan_interval_ms = src->scan_interval_ms < 50 ? RC522_DEFAULT_SCAN_INTERVAL_MS : src->scan_interval_ms;
     dst->task_stack_size = src->task_stack_size == 0 ? RC522_DEFAULT_TASK_STACK_SIZE : src->task_stack_size;
     dst->task_priority = src->task_priority == 0 ? RC522_DEFAULT_TASK_STACK_PRIORITY : src->task_priority;
-    dst->spi.clock_speed_hz = src->spi.clock_speed_hz == 0 ? RC522_DEFAULT_SPI_CLOCK_SPEED_HZ : src->spi.clock_speed_hz;
-    dst->i2c.rw_timeout_ms = src->i2c.rw_timeout_ms == 0 ? RC522_DEFAULT_I2C_RW_TIMEOUT_MS : src->i2c.rw_timeout_ms;
-    dst->i2c.clock_speed_hz = src->i2c.clock_speed_hz == 0 ? RC522_DEFAULT_I2C_CLOCK_SPEED_HZ : src->i2c.clock_speed_hz;
+    dst->transport = src->transport;
+    if (src->transport == RC522_TRANSPORT_SPI) {
+        dst->spi.clock_speed_hz = src->spi.clock_speed_hz == 0 ? RC522_DEFAULT_SPI_CLOCK_SPEED_HZ : src->spi.clock_speed_hz;
+    } else if (src->transport == RC522_TRANSPORT_I2C) {
+        dst->i2c.rw_timeout_ms = src->i2c.rw_timeout_ms == 0 ? RC522_DEFAULT_I2C_RW_TIMEOUT_MS : src->i2c.rw_timeout_ms;
+        dst->i2c.clock_speed_hz = src->i2c.clock_speed_hz == 0 ? RC522_DEFAULT_I2C_CLOCK_SPEED_HZ : src->i2c.clock_speed_hz;
+    }
 }
 
-static esp_err_t rc522_clone_config(const rc522_config_t * config, rc522_config_t** result) {
-    rc522_config_t* _clone_config = NULL;
-    
-    ALLOC_RET_GUARD(_clone_config = calloc(1, sizeof(rc522_config_t)));
-    
-    memcpy(_clone_config, config, sizeof(rc522_config_t));
-
-    // defaults
-    _clone_config->scan_interval_ms = config->scan_interval_ms < 50 ? RC522_DEFAULT_SCAN_INTERVAL_MS : config->scan_interval_ms;
-    _clone_config->task_stack_size = config->task_stack_size == 0 ? RC522_DEFAULT_TASK_STACK_SIZE : config->task_stack_size;
-    _clone_config->task_priority = config->task_priority == 0 ? RC522_DEFAULT_TASK_STACK_PRIORITY : config->task_priority;
-    _clone_config->spi.clock_speed_hz = config->spi.clock_speed_hz == 0 ? RC522_DEFAULT_SPI_CLOCK_SPEED_HZ : config->spi.clock_speed_hz;
-    _clone_config->i2c.rw_timeout_ms = config->i2c.rw_timeout_ms == 0 ? RC522_DEFAULT_I2C_RW_TIMEOUT_MS : config->i2c.rw_timeout_ms;
-    _clone_config->i2c.clock_speed_hz = config->i2c.clock_speed_hz == 0 ? RC522_DEFAULT_I2C_CLOCK_SPEED_HZ : config->i2c.clock_speed_hz;
-
-    *result = _clone_config;
-
-    return ESP_OK;
-}
-
-static esp_err_t rc522_create_transport(rc522_handle_t rc522)
-{
+static esp_err_t rc522_create_transport(rc522_handle_t rc522) {
     esp_err_t err = ESP_OK;
 
-    switch(rc522->config->transport) {
+    switch(rc522->config.transport) {
         case RC522_TRANSPORT_SPI: {
                 spi_device_interface_config_t devcfg = {
-                    .clock_speed_hz = rc522->config->spi.clock_speed_hz,
+                    .clock_speed_hz = rc522->config.spi.clock_speed_hz,
                     .mode = 0,
-                    .spics_io_num = rc522->config->spi.cs,
+                    .spics_io_num = rc522->config.spi.cs,
                     .queue_size = 7,
-                    .flags = rc522->config->spi.device_flags,
+                    .flags = rc522->config.spi.device_flags,
                 };
 
-                rc522->bus_initialized_by_user = rc522->config->spi.bus_is_initialized;
+                rc522->bus_initialized_by_user = rc522->config.spi.bus_is_initialized;
 
-                if(! rc522->bus_initialized_by_user) {
+                if (!rc522->bus_initialized_by_user) {
                     spi_bus_config_t buscfg = {
-                        .miso_io_num = rc522->config->spi.miso,
-                        .mosi_io_num = rc522->config->spi.mosi,
-                        .sclk_io_num = rc522->config->spi.sclk,
+                        .miso_io_num = rc522->config.spi.miso,
+                        .mosi_io_num = rc522->config.spi.mosi,
+                        .sclk_io_num = rc522->config.spi.sclk,
                         .quadwp_io_num = -1,
                         .quadhd_io_num = -1,
                     };
 
-                    ESP_ERR_RET_GUARD(spi_bus_initialize(rc522->config->spi.host, &buscfg, 0));
+                    ESP_ERR_RET_GUARD(spi_bus_initialize(rc522->config.spi.host, &buscfg, 0));
                 }
 
-                ESP_ERR_RET_GUARD(spi_bus_add_device(rc522->config->spi.host, &devcfg, &rc522->spi_handle));
+                ESP_ERR_RET_GUARD(spi_bus_add_device(rc522->config.spi.host, &devcfg, &rc522->spi_handle));
             }
             break;
         case RC522_TRANSPORT_I2C: {
                 i2c_config_t conf = {
                     .mode = I2C_MODE_MASTER,
-                    .sda_io_num = rc522->config->i2c.sda,
-                    .scl_io_num = rc522->config->i2c.scl,
+                    .sda_io_num = rc522->config.i2c.sda,
+                    .scl_io_num = rc522->config.i2c.scl,
                     .sda_pullup_en = GPIO_PULLUP_ENABLE,
                     .scl_pullup_en = GPIO_PULLUP_ENABLE,
-                    .master.clk_speed = rc522->config->i2c.clock_speed_hz,
+                    .master.clk_speed = rc522->config.i2c.clock_speed_hz,
                 };
 
-                ESP_ERR_RET_GUARD(i2c_param_config(rc522->config->i2c.port, &conf));
-                ESP_ERR_RET_GUARD(i2c_driver_install(rc522->config->i2c.port, conf.mode, false, false, 0x00));
+                ESP_ERR_RET_GUARD(i2c_param_config(rc522->config.i2c.port, &conf));
+                ESP_ERR_RET_GUARD(i2c_driver_install(rc522->config.i2c.port, conf.mode, false, false, 0x00));
             }
             break;
         default: {
@@ -263,9 +284,13 @@ static esp_err_t rc522_create_transport(rc522_handle_t rc522)
     return err;
 }
 
+// 初始化RC522模块
+// 参数config: 指向配置结构的指针
+// 参数out_rc522: 用于存储创建的RC522实例的变量
+// 返回值: 错误码，ESP_OK表示成功，其他值表示错误
 esp_err_t rc522_create(const rc522_config_t * config, rc522_handle_t * out_rc522) {
     // 检查输入参数是否有效
-    if(!config || !out_rc522) {
+    if (!config || !out_rc522) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -275,13 +300,17 @@ esp_err_t rc522_create(const rc522_config_t * config, rc522_handle_t * out_rc522
     rc522_handle_t rc522 = NULL;
     
     // 分配内存以存储RC522实例
-    ALLOC_RET_GUARD(rc522 = malloc(sizeof(struct rc522)));
+    ALLOC_RET_GUARD(rc522 = malloc(sizeof(rc522_handle_t)));
 
-    // 复制配置参数
-    ESP_ERR_LOG_AND_JMP_GUARD(rc522_clone_config(
-        config, 
-        &(rc522->config)
-    ), "Fail to clone config");
+    rc522->running = false;
+    config_cpy(&(rc522->config), config); // 复制配置参数
+    rc522->task_handle = NULL;
+    rc522->event_handle = NULL;
+    rc522->spi_handle = NULL;
+    rc522->initialized = false;
+    rc522->scanning = false;
+    rc522->tag_was_present_last_time = false;
+    rc522->bus_initialized_by_user = false;
 
     // 创建传输层
     ESP_ERR_LOG_AND_JMP_GUARD(rc522_create_transport(
@@ -303,13 +332,13 @@ esp_err_t rc522_create(const rc522_config_t * config, rc522_handle_t * out_rc522
     // 标记RC522为运行状态
     rc522->running = true;
 
-    // 创建RC522任务
+    // 创建RC522任务线程
     CONDITION_LOG_AND_JMP_GUARD(pdTRUE != xTaskCreate(
         rc522_task,
         "rc522_task",
-        rc522->config->task_stack_size,
+        rc522->config.task_stack_size,
         rc522,
-        rc522->config->task_priority,
+        rc522->config.task_priority,
         &rc522->task_handle
     ), "Fail to create task");
 
@@ -325,21 +354,47 @@ esp_err_t rc522_create(const rc522_config_t * config, rc522_handle_t * out_rc522
     return err;
 }
 
-esp_err_t rc522_register_events(rc522_handle_t rc522, rc522_event_t event, esp_event_handler_t event_handler, void* event_handler_arg)
-{
-    if(! rc522) {
+/**
+ * 注册RC522模块的事件处理函数。
+ * 
+ * 本函数用于将指定的事件处理函数注册到RC522模块的事件循环中。
+ * 这样，当指定事件发生时，可以自动调用相应的处理函数。
+ * 
+ * @param rc522 RC522模块的句柄，用于标识具体的RC522模块实例。
+ * @param event 需要注册的事件类型。
+ * @param event_handler 事件处理函数，当指定事件发生时会被调用。
+ * @param event_handler_arg 事件处理函数的参数，可以在事件处理函数中使用。
+ * 
+ * @return 如果操作成功，返回ESP_OK；如果参数无效，返回ESP_ERR_INVALID_ARG。
+ */
+esp_err_t rc522_register_events(rc522_handle_t rc522, rc522_event_t event, esp_event_handler_t event_handler, void* event_handler_arg) {
+    // 检查rc522句柄是否为空，为空则返回参数错误
+    if (!rc522) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    // 注册事件处理函数
     return esp_event_handler_register_with(rc522->event_handle, RC522_EVENTS, event, event_handler, event_handler_arg);
 }
 
-esp_err_t rc522_unregister_events(rc522_handle_t rc522, rc522_event_t event, esp_event_handler_t event_handler)
-{
-    if(! rc522) {
+/**
+ * @brief 取消注册RC522事件的处理函数
+ * 
+ * 该函数用于从事件循环中移除指定的事件处理函数。这对于不再需要事件更新或避免内存泄漏是必要的。
+ * 
+ * @param rc522 RC522设备的句柄，用于识别特定的RC522设备。
+ * @param event 需要取消注册的事件类型。
+ * @param event_handler 需要被移除的事件处理函数。
+ * 
+ * @return esp_err_t 返回操作结果，可能的值为ESP_OK（成功）或ESP_ERR_INVALID_ARG（输入参数无效）。
+ */
+esp_err_t rc522_unregister_events(rc522_handle_t rc522, rc522_event_t event, esp_event_handler_t event_handler) {
+    // 检查rc522句柄是否为空，为空则返回无效参数错误
+    if (!rc522) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    // 从事件循环中取消注册指定的事件处理函数
     return esp_event_handler_unregister_with(rc522->event_handle, RC522_EVENTS, event, event_handler);
 }
 
@@ -347,7 +402,7 @@ static uint64_t rc522_sn_to_u64(uint8_t* sn)
 {
     uint64_t result = 0;
 
-    if(! sn) {
+    if (!sn) {
         return 0;
     }
 
@@ -390,7 +445,7 @@ static esp_err_t rc522_calculate_crc(rc522_handle_t rc522, uint8_t *data, uint8_
         i--; // 延时循环计数器递减
 
         // 检查是否CRC计算完成
-        if(!(i != 0 && !(nn & 0x04))) {
+        if (!(i != 0 && !(nn & 0x04))) {
             break;
         }
     }
@@ -432,10 +487,10 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t
     uint8_t tmp;
     
     // 根据命令设置中断请求和中断等待寄存器值
-    if(cmd == RC522_CMD_AUTHENT) {
+    if (cmd == RC522_CMD_AUTHENT) {
         irq = 0x12;
         irq_wait = 0x10;
-    } else if(cmd == RC522_CMD_TRANSCEIVE) {
+    } else if (cmd == RC522_CMD_TRANSCEIVE) {
         irq = 0x77;
         irq_wait = 0x30;
     }
@@ -454,7 +509,7 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t
     ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_REG_COMMAND, cmd));
 
     // 如果是TRANSCEIVE命令，设置位帧寄存器
-    if(cmd == RC522_CMD_TRANSCEIVE) {
+    if (cmd == RC522_CMD_TRANSCEIVE) {
         ESP_ERR_JMP_GUARD(rc522_set_bitmask(rc522, RC522_REG_BIT_FRAMING, 0x80));
     }
 
@@ -470,7 +525,7 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t
         i--;
 
         // 判断是否满足中断条件或超时
-        if(! (i != 0 && (((nn & 0x01) == 0) && ((nn & irq_wait) == 0)))) {
+        if (!(i != 0 && (((nn & 0x01) == 0) && ((nn & irq_wait) == 0)))) {
             break;
         }
     }
@@ -479,13 +534,13 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t
     ESP_ERR_JMP_GUARD(rc522_clear_bitmask(rc522, RC522_REG_BIT_FRAMING, 0x80));
 
     // 如果没有超时
-    if(i != 0) {
+    if (i != 0) {
         // 读取错误寄存器
         ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_REG_ERROR, &tmp));
 
         // 如果没有错误
-        if((tmp & 0x1B) == 0x00) {
-            if(cmd == RC522_CMD_TRANSCEIVE) {
+        if ((tmp & 0x1B) == 0) {
+            if (cmd == RC522_CMD_TRANSCEIVE) {
                 // 读取FIFO水平寄存器
                 ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_REG_FIFO_LEVEL, &nn));
                 // 读取控制寄存器
@@ -504,7 +559,7 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t
                 }
 
                 // 如果有数据接收
-                if(_res_n > 0) {
+                if (_res_n > 0) {
                     // 分配接收数据的内存
                     ALLOC_JMP_GUARD(_result = (uint8_t*) malloc(_res_n));
 
@@ -556,7 +611,7 @@ static esp_err_t rc522_request(rc522_handle_t rc522, uint8_t req_mode, uint8_t *
     ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, &req_mode, 1, &_res_n, &_result));
 
     // 检查接收到的数据长度是否符合预期，不符合则释放资源并返回错误
-    if(_res_n * 8 != 0x10) {
+    if (_res_n * 8 != 0x10) {
         free(_result);
         return ESP_ERR_INVALID_STATE;
     }
@@ -618,20 +673,31 @@ static esp_err_t rc522_picc_wakeup(rc522_handle_t rc522)
     return err;
 }
 
-
+/**
+ * @brief 实现RFID卡的防冲突算法
+ * 
+ * 该函数用于在多张RFID卡同时进入读写器的射频场时，实现卡的识别和防冲突。
+ * 通过读写器的通信接口实现卡的防冲突操作，获取唯一卡的UID。
+ * 
+ * @param rc522 读写器的句柄，用于操作RFID读写器
+ * @param result 返回识别出的RFID卡的UID指针
+ * @return esp_err_t 返回操作的错误码
+ */
 static esp_err_t rc522_anticoll(rc522_handle_t rc522, uint8_t ** result) {
-    esp_err_t err = ESP_OK;
-    uint8_t* _result = NULL;
-    uint8_t _res_n;
+    esp_err_t err = ESP_OK; // 初始化错误码为成功
+    uint8_t* _result = NULL; // 用于存储返回的UID
+    uint8_t _res_n; // 存储返回的长度
 
+    // 设置位帧寄存器为0x00，准备进行防冲突操作
     ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
+    // 向读写器发送防冲突命令和相关数据，获取唯一卡的UID
     ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) MIFARE_ANTICOLLISION_CL_1, 2, &_res_n, &_result));
 
     // TODO: Some cards have length of 4, and some of them have length of 7 bytes
     //       here we are using one extra byte which is not part of UID.
     //       Implement logic to determine the length of the UID and use that info
     //       to retrieve the serial number aka UID
-    if(_result && _res_n != 5) { // all cards/tags serial numbers is 5 bytes long (??)
+    if (_result && _res_n != 5) { // all cards/tags serial numbers is 5 bytes long (??)
         ESP_ERR_LOG_AND_JMP_GUARD(ESP_ERR_INVALID_RESPONSE, "invalid length of serial number");
     }
 
@@ -677,23 +743,44 @@ static esp_err_t rc522_stop_picc_communication(rc522_handle_t rc522)
     return err;
 }
 
+/**
+ * @brief 从RC522读取标签
+ * 
+ * 本函数尝试从RC522读取一个标签。它首先发送一个请求来激活标签，然后通过防冲突机制选择一个特定的标签，
+ * 最后停止与标签的通信。如果成功读取到标签，将返回标签信息的指针。
+ * 
+ * @param rc522 RC522设备的句柄，用于操作RC522芯片。
+ * @param result 输出参数，返回读取到的标签信息的指针。
+ * @return esp_err_t 表示操作是否成功的错误码。
+ */
 static esp_err_t rc522_get_tag(rc522_handle_t rc522, uint8_t ** result) {
+    // 初始化错误码为成功
     esp_err_t err = ESP_OK;
+    // 用于存储标签信息的指针，初始为NULL
     uint8_t * _result = NULL;
+    // 临时存储从RC522读取到的数据
     uint8_t * res_data = NULL;
+    // 读取到的数据的字节数
     uint8_t res_data_n;
 
+    // 发送请求以激活标签
     ESP_ERR_JMP_GUARD(rc522_request(rc522, MIFARE_REQA, &res_data_n, &res_data));
 
-    if(res_data != NULL) {
+    // 如果成功读取到数据
+    if (res_data != NULL) {
+        // 释放读取到的数据内存
         FREE(res_data);
+        // 通过防冲突机制选择一个特定的标签
         ESP_ERR_JMP_GUARD(rc522_anticoll(rc522, &_result));
 
-        if(_result != NULL) {
+        // 如果成功选择到标签
+        if (_result != NULL) {
+            // 停止与标签的通信
             ESP_ERR_JMP_GUARD(rc522_stop_picc_communication(rc522));
         }
     }
 
+    // 异常处理，确保资源被正确释放
     JMP_GUARD_GATES({
         FREE(_result);
         FREE(res_data);
@@ -701,6 +788,7 @@ static esp_err_t rc522_get_tag(rc522_handle_t rc522, uint8_t ** result) {
         *result = _result;
     });
 
+    // 返回操作是否成功的错误码
     return err;
 }
 
@@ -761,8 +849,7 @@ static esp_err_t  rc522_read_block_from_picc(rc522_handle_t rc522, uint8_t block
     return err;
 }
 
-static esp_err_t rc522_read_sector_from_picc(rc522_handle_t rc522, MIFARE_Key* key, uint8_t sector)
-{
+static esp_err_t rc522_read_sector_from_picc(rc522_handle_t rc522, MIFARE_Key* key, uint8_t sector) {
     esp_err_t err = ESP_OK;
 
     uint8_t no_of_blocks = 4; // Number of blocks in sector, 4 in MIFARE cards
@@ -803,7 +890,7 @@ static esp_err_t rc522_read_sector_from_picc(rc522_handle_t rc522, MIFARE_Key* k
         }
         
         // Block number
-		if(blockAddr < 10)
+		if (blockAddr < 10)
 			printf("   "); // Pad with spaces
 		else {
 			printf("  "); // Pad with spaces
@@ -826,18 +913,14 @@ static esp_err_t rc522_read_sector_from_picc(rc522_handle_t rc522, MIFARE_Key* k
         uint8_t* res_data = NULL;
         uint8_t res_data_n;
         ESP_ERR_JMP_GUARD(rc522_request(rc522, MIFARE_WUPA, &res_data_n, &res_data));
-        if(res_data != NULL) {
+        if (res_data != NULL) {
 		    ESP_ERR_JMP_GUARD(rc522_read_block_from_picc(rc522, blockAddr, buffer, &byteCount));
         }
         FREE(res_data);
         res_data_n = 0;
 		// Dump data
 		for (uint8_t index = 0; index < 16; index++) {
-			// if(buffer[index] < 0x10)
-			// 	printf(" 0");
-			// else
-				printf(" ");
-			printf("0x%02x", buffer[index]);
+			printf(" 0x%02x", buffer[index]);
 			if ((index % 4) == 3) {
 				printf(" ");
 			}
@@ -924,50 +1007,63 @@ static esp_err_t rc522_read_data_from_picc(rc522_handle_t rc522, MIFARE_Key* key
     return err;
 }
 
-esp_err_t rc522_start(rc522_handle_t rc522)
-{
+// 开始RC522模块，进入扫描模式。
+// 如果模块尚未初始化，则在开始前进行初始化。
+// 参数:
+// - rc522: RC522模块的句柄。
+// 返回值:
+// - esp_err_t: 操作的错误代码。
+esp_err_t rc522_start(rc522_handle_t rc522) {
     esp_err_t err = ESP_OK;
 
-    if(! rc522) {
+    if (!rc522) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if(rc522->scanning) { // Already in scan mode
+    if (rc522->scanning) { // 已经处于扫描模式
         return ESP_OK;
     }
 
     uint8_t tmp = 0;
 
-    if(! rc522->initialized) {
-        // Initialization will be done only once, on the first call of start function
+    if (!rc522->initialized) {
+        // 初始化仅执行一次，在首次调用启动函数时完成。
 
-        // TODO: Extract test in dedicated function
-        // ---------- RW test ------------
-        // TODO: Use less sensitive register for the test, or return the value
-        //       of this register to the previous state at the end of the test
-        const uint8_t test_addr = RC522_REG_MOD_WIDTH, test_val = 0x25;
+        // TODO: 将测试提取到专用函数中
+        // ---------- 读写测试 ------------
+        // TODO: 使用敏感度较低的寄存器进行测试，或在测试结束时将寄存器恢复到原始状态
+        const rc522_reg_t test_addr = RC522_REG_MOD_WIDTH, test_val = 0x25;
         uint8_t pass = 0;
 
-        for(uint8_t i = test_val; i < test_val + 2; i++) {
+        for (uint8_t i = test_val; i < test_val + 2; i++) {
+            // ESP_LOGI(TAG, "rc522_write(%p, %u, %u)", rc522, test_addr, i);
             err = rc522_write(rc522, test_addr, i);
 
-            if(err == ESP_OK) {
-                err = rc522_read(rc522, test_addr, &tmp);
-
-                if(err == ESP_OK && tmp == i) {
-                    pass = 1;
-                }
-            }
-
-            if(pass != 1) {
-                ESP_LOGE(TAG, "Read/write test failed");
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "RW test failed on write %u", i);
                 rc522_destroy(rc522);
 
                 return err;
+            } else {
+                err = rc522_read(rc522, test_addr, &tmp);
+
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "RW test failed on read %u", i);
+                    rc522_destroy(rc522);
+
+                    return err;
+                } else if (tmp != i) {
+                    ESP_LOGE(TAG, "RW test failed %u", i);
+                    rc522_destroy(rc522);
+
+                    return err;
+                }
             }
         }
-        // ------- End of RW test --------
+        xTaskNotify(rc522->task_handle, EVENT_BIT_HARDWARE_READY, eSetBits);
+        // ------- 读写测试结束 --------
 
+        // 执行必要的寄存器配置以初始化RC522模块。
         ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_COMMAND, RC522_CMD_SOFTRESET));
         ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_TIMER_MODE, 0x8D));
         ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_TIMER_PRESCALER, 0x3E));
@@ -976,11 +1072,13 @@ esp_err_t rc522_start(rc522_handle_t rc522)
         ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_TX_ASK, 0x40));
         ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_MODE, 0x3D));
 
+        // 打开天线并加载固件。
         ESP_ERR_RET_GUARD(rc522_antenna_on(rc522));
         ESP_ERR_RET_GUARD(rc522_firmware(rc522, &tmp));
 
         rc522->initialized = true;
 
+        // 记录固件版本。
         ESP_LOGI(TAG, "Initialized (firmware v%d.0)", (tmp & 0x03));
     }
 
@@ -989,34 +1087,63 @@ esp_err_t rc522_start(rc522_handle_t rc522)
     return ESP_OK;
 }
 
+/**
+ * 暂停RFID扫描功能
+ * 
+ * 此函数用于暂停RFID扫描如果RFID扫描已经暂停，则无需进行任何操作
+ * 
+ * @param rc522 RFID处理句柄，指向RFID操作结构体的指针
+ * @return 返回操作状态，可能的值为：
+ *         - ESP_OK：操作成功
+ *         - ESP_ERR_INVALID_ARG：输入参数无效（rc522为NULL）
+ */
 esp_err_t rc522_pause(rc522_handle_t rc522) {
-    if(!rc522) {
+    // 检查输入参数是否有效，如果rc522为NULL，则返回错误
+    if (!rc522) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if(!rc522->scanning) {
+    // 如果扫描已经暂停，则无需进行任何操作，直接返回成功
+    if (!rc522->scanning) {
         return ESP_OK;
     }
 
+    // 将扫描状态设置为false，暂停扫描
     rc522->scanning = false;
 
+    // 操作成功，返回ESP_OK
     return ESP_OK;
 }
 
+/**
+ * @brief 销毁RC522传输层设备
+ * 
+ * 根据RC522模块使用的传输层类型（SPI或I2C），执行相应的销毁操作。
+ * 如果是SPI类型，将从总线上移除设备，如果总线是由用户初始化的，还将释放总线。
+ * 如果是I2C类型，将删除I2C驱动程序。
+ * 如果传输层类型未知，将返回错误状态。
+ * 
+ * @param rc522 RC522模块的句柄，用于访问模块的配置和状态信息
+ * @return esp_err_t 返回操作的结果，成功返回ESP_OK，失败返回相应的错误码
+ */
 static esp_err_t rc522_destroy_transport(rc522_handle_t rc522) {
     esp_err_t err;
 
-    switch(rc522->config->transport) {
+    // 根据配置的传输层类型执行相应的销毁操作
+    switch(rc522->config.transport) {
         case RC522_TRANSPORT_SPI:
-            err = spi_bus_remove_device(rc522->spi_handle);
+            err = spi_bus_remove_device(rc522->spi_handle); // 从SPI总线上移除设备
+            // 如果总线是由用户初始化的，释放总线
             if (rc522->bus_initialized_by_user) {
-                err = spi_bus_free(rc522->config->spi.host);
+                err = spi_bus_free(rc522->config.spi.host);
             }
             break;
         case RC522_TRANSPORT_I2C:
-            err = i2c_driver_delete(rc522->config->i2c.port);
+            // 删除I2C驱动程序
+            err = i2c_driver_delete(rc522->config.i2c.port);
             break;
         default:
+            // 如果传输层类型未知，记录警告并返回错误状态
             ESP_LOGW(TAG, "destroy_transport: Unknown transport");
             err = ESP_ERR_INVALID_STATE;
     }
@@ -1035,11 +1162,11 @@ static esp_err_t rc522_destroy_transport(rc522_handle_t rc522) {
 esp_err_t rc522_destroy(rc522_handle_t rc522) {
     esp_err_t err = ESP_OK; // 初始化错误码为成功
 
-    if(!rc522) {
+    if (!rc522) {
         return ESP_ERR_INVALID_ARG; // 如果传入的句柄为空，返回无效参数错误
     }
 
-    if(xTaskGetCurrentTaskHandle() == rc522->task_handle) {
+    if (xTaskGetCurrentTaskHandle() == rc522->task_handle) {
         ESP_LOGE(TAG, "Cannot destroy rc522 from event handler"); // 如果当前任务句柄与RC522的任务句柄相同，记录错误日志
 
         return ESP_ERR_INVALID_STATE; // 返回无效状态错误
@@ -1052,22 +1179,20 @@ esp_err_t rc522_destroy(rc522_handle_t rc522) {
 
     err = rc522_destroy_transport(rc522); // 释放RC522传输资源
 
-    if(rc522->event_handle) {
+    if (rc522->event_handle) {
         err = esp_event_loop_delete(rc522->event_handle); // 如果事件句柄存在，删除事件循环
         rc522->event_handle = NULL; // 将事件句柄置空
     }
 
-    FREE(rc522->config); // 释放配置内存
     FREE(rc522); // 释放RC522设备句柄内存
 
     return err; // 返回操作结果
 }
 
-static esp_err_t rc522_dispatch_event(rc522_handle_t rc522, rc522_event_t event, void* data)
-{
+static esp_err_t rc522_dispatch_event(rc522_handle_t rc522, rc522_event_t event, void* data) {
     esp_err_t err;
 
-    if(! rc522) {
+    if (!rc522) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -1088,21 +1213,51 @@ static esp_err_t rc522_dispatch_event(rc522_handle_t rc522, rc522_event_t event,
     return esp_event_loop_run(rc522->event_handle, 0);
 }
 
+/**
+ * @brief RC522 SPI总线数据发送函数
+ * 
+ * 本函数负责通过SPI总线向RC522发送命令或数据。它首先对发送缓冲区中的数据进行格式调整，
+ * 然后通过SPI设备句柄进行数据传输。
+ * 
+ * @param rc522 RC522设备句柄，包含SPI设备句柄等信息
+ * @param buffer 发送缓冲区，包含待发送的数据
+ * @param length 发送数据的长度，单位为字节
+ * @return esp_err_t 返回spi_device_transmit函数的执行结果，表示发送操作是否成功
+ * 
+ * @note 发送缓冲区的第一个字节会在发送前进行位移和屏蔽操作，以符合RC522的通信协议格式。
+ */
 static esp_err_t rc522_spi_send(rc522_handle_t rc522, uint8_t * buffer, uint8_t length) {
+    // 调整发送数据的第一个字节，符合RC522的通信协议要求
     buffer[0] = (buffer[0] << 1) & 0x7E;
 
+    // 构建并发起SPI传输请求
     return spi_device_transmit(rc522->spi_handle, &(spi_transaction_t){
-        .length = 8 * length,
-        .tx_buffer = buffer,
+        .length = 8 * length, // 设置传输的位长度
+        .tx_buffer = buffer, // 指定发送缓冲区
     });
 }
 
+/**
+ * @brief 通过SPI接收数据
+ * 
+ * 该函数用于通过SPI接口从RC522芯片接收数据。它支持半双工和全双工两种SPI模式。
+ * 在半双工模式下，数据的发送和接收是分开进行的；而在全双工模式下，可以同时发送和接收数据。
+ * 
+ * @param rc522 RC522设备句柄，包含SPI配置信息
+ * @param buffer 接收数据的缓冲区
+ * @param length 要接收的字节数
+ * @param addr RC522芯片的地址
+ * @return esp_err_t 返回操作状态，ESP_OK表示成功，其他值表示错误
+ */
 static esp_err_t rc522_spi_receive(rc522_handle_t rc522, uint8_t * buffer, uint8_t length, uint8_t addr) {
-    esp_err_t err = ESP_OK;
+    esp_err_t err = ESP_OK; // 初始化错误码为ESP_OK
 
+    // 根据RC522芯片的通信协议，将地址位左移一位，并设置读操作标志位
     addr = ((addr << 1) & 0x7E) | 0x80;
 
-    if(SPI_DEVICE_HALFDUPLEX & rc522->config->spi.device_flags) {
+    // 检查SPI设备是否配置为半双工模式
+    if (SPI_DEVICE_HALFDUPLEX & rc522->config.spi.device_flags) {
+        // 在半双工模式下，一次传输中同时发送地址和接收数据
         ESP_ERR_RET_GUARD(spi_device_transmit(rc522->spi_handle, &(spi_transaction_t) {
             .flags = SPI_TRANS_USE_TXDATA,
             .length = 8,
@@ -1110,13 +1265,15 @@ static esp_err_t rc522_spi_receive(rc522_handle_t rc522, uint8_t * buffer, uint8
             .rxlength = 8 * length,
             .rx_buffer = buffer,
         }));
-    } else { // Fullduplex
+    } else { // 全双工模式
+        // 首先发送地址，不接收数据
         ESP_ERR_RET_GUARD(spi_device_transmit(rc522->spi_handle, &(spi_transaction_t) {
             .flags = SPI_TRANS_USE_TXDATA,
             .length = 8,
             .tx_data[0] = addr,
         }));
 
+        // 然后进行数据接收
         ESP_ERR_RET_GUARD(spi_device_transmit(rc522->spi_handle, &(spi_transaction_t) {
             .flags = 0x00,
             .length = 8,
@@ -1125,56 +1282,101 @@ static esp_err_t rc522_spi_receive(rc522_handle_t rc522, uint8_t * buffer, uint8
         }));
     }
 
-    return err;
+    return err; // 返回操作状态
 }
 
-static inline esp_err_t rc522_i2c_send(rc522_handle_t rc522, uint8_t* buffer, uint8_t length)
-{
+/**
+ * 通过I2C总线向RC522发送数据
+ * 
+ * 此函数封装了通过I2C总线向RC522芯片发送数据的逻辑，使用了底层的I2C主写函数实现
+ * 它是静态内联函数，旨在提高运行时的效率，减少函数调用的开销
+ * 
+ * @param rc522 RC522设备的句柄，包含了配置信息等
+ * @param buffer 指向发送数据的缓冲区的指针
+ * @param length 要发送的数据长度（字节数）
+ * @return 返回操作结果，esp_err_t类型的错误代码
+ * 
+ * 调用此函数是为了将数据从微控制器通过I2C总线发送到RC522芯片中
+ * 它依赖于提供的RC522设备句柄来获取I2C端口信息，并使用全局定义的RC522_I2C_ADDRESS地址进行通信
+ * 超时设置通过配置中的读写超时转换为tick来实现，确保了函数调用的灵活性和稳定性
+ */
+static inline esp_err_t rc522_i2c_send(rc522_handle_t rc522, uint8_t* buffer, uint8_t length) {
     return i2c_master_write_to_device(
-        rc522->config->i2c.port,
+        rc522->config.i2c.port,
         RC522_I2C_ADDRESS,
         buffer,
         length,
-        rc522->config->i2c.rw_timeout_ms / portTICK_PERIOD_MS
+        rc522->config.i2c.rw_timeout_ms / portTICK_PERIOD_MS
     );
 }
 
+/**
+ * @brief 通过I2C接收数据
+ * 
+ * 该函数用于从RC522设备通过I2C总线接收指定长度的数据。它内部调用了`i2c_master_write_read_device`函数，
+ * 该函数需要传入I2C端口、设备地址、用于写入的地址指针、写入长度、用于读取的缓冲区、读取长度以及超时时间。
+ * 
+ * @param rc522 RC522设备句柄，包含了配置信息
+ * @param buffer 接收数据的缓冲区
+ * @param length 要接收的数据长度
+ * @param addr I2C设备内部的寄存器地址
+ * 
+ * @return esp_err_t 返回操作结果，可能的错误代码
+ */
 static inline esp_err_t rc522_i2c_receive(rc522_handle_t rc522, uint8_t * buffer, uint8_t length, uint8_t addr) {
+    // 调用i2c_master_write_read_device函数进行读操作
+    // 参数依次为：I2C端口、设备地址、写入的寄存器地址、写入长度、读取缓冲区、读取长度、超时时间（毫秒）
     return i2c_master_write_read_device(
-        rc522->config->i2c.port,
+        rc522->config.i2c.port,
         RC522_I2C_ADDRESS,
         &addr,
         1,
         buffer,
         length,
-        rc522->config->i2c.rw_timeout_ms / portTICK_PERIOD_MS
+        rc522->config.i2c.rw_timeout_ms / portTICK_PERIOD_MS
     );
 }
 
-static void rc522_task(void* arg)
-{
+/**
+ * rc522_task函数是RC522读卡器模块的任务函数。
+ * 它负责初始化RC522模块，然后进入一个循环，不断扫描是否有RFID标签靠近读卡器。
+ * 如果有标签靠近，它将读取标签的序列号，并触发一个事件通知上层应用。
+ * 
+ * 参数:
+ * arg - 传递给任务的参数，这里是rc522_handle_t类型的指针，用于访问RC522模块的内部状态。
+ */
+static void rc522_task(void* arg) {
+    // 将arg转换为rc522_handle_t类型，并保存在本地变量中，以便于访问RC522模块的状态。
     rc522_handle_t rc522 = (rc522_handle_t) arg;
 
-    while(rc522->running) {
-        if(! rc522->scanning) {
-            // Idling...
+    // 输出日志，指示RC522任务开始运行，并等待读写测试完成。
+    ESP_LOGI(TAG, "Starting rc522 task, wait for RW test...");
+    // 等待硬件准备就绪的事件通知。
+    xTaskNotifyWait(0, EVENT_BIT_HARDWARE_READY, NULL, portMAX_DELAY);
+
+    // 循环运行，直到RC522模块停止。
+    while (rc522->running) {
+        // 如果没有进行扫描，则跳过当前循环，等待下一次扫描。
+        if (!rc522->scanning) {
             vTaskDelay(100 / portTICK_PERIOD_MS);
             continue;
         }
 
+        // 用于存储标签的序列号的指针。
         uint8_t * serial_no_array = NULL;
 
-        if(ESP_OK != rc522_get_tag(rc522, &serial_no_array)) {
-            // Tag is not present
-            //
-            // TODO: Implement logic to know when the error is due to
-            //       tag absence or some other protocol issue
+        // 调用rc522_get_tag函数尝试获取标签的序列号。
+        if (ESP_OK != rc522_get_tag(rc522, &serial_no_array)) {
+            // 如果获取失败，可能是没有标签靠近或者通信问题。
+            // TODO: 需要实现逻辑来判断是标签不存在还是其他协议问题。
         }
         
-        if(!serial_no_array) {
+        // 检查是否成功获取到标签的序列号。
+        if (!serial_no_array) {
+            // 如果没有获取到序列号，重置上次标签存在状态。
             rc522->tag_was_present_last_time = false;
-        } else if(!rc522->tag_was_present_last_time) {
-            // rc522->tag_uid = (uint8_t*) malloc(32);
+        } else if (!rc522->tag_was_present_last_time) {
+            // 如果上次没有标签，现在获取到了，则记录标签信息并触发事件。
             memcpy(rc522->tag_uid, serial_no_array, 32);
             rc522_tag_t tag = {
                 .serial_number = rc522_sn_to_u64(serial_no_array),
@@ -1183,27 +1385,28 @@ static void rc522_task(void* arg)
             rc522_dispatch_event(rc522, RC522_EVENT_TAG_SCANNED, &tag);
             rc522->tag_was_present_last_time = true;
 
-            
-            // TEST AUTHENTICATION
+            // 尝试进行身份验证。
             MIFARE_Key key;
-            // All keys are set to FFFFFFFFFFFFh at chip delivery from the factory.
-			for (uint8_t i = 0; i < 6; i++) {
-				key.keyByte[i] = 0xff;
-			}
+            for (uint8_t i = 0; i < 6; i++) {
+                key.keyByte[i] = 0xff;
+            }
             rc522_read_data_from_picc(rc522, &key);
-            
         } else {
+            // 如果上次已经有标签存在，则释放序列号数组。
             FREE(serial_no_array);
         }
 
-        int delay_interval_ms = rc522->config->scan_interval_ms;
-
-        if(rc522->tag_was_present_last_time) {
-            delay_interval_ms *= 2; // extra scan-bursting prevention
+        // 计算下一次扫描的延迟间隔。
+        int delay_interval_ms = rc522->config.scan_interval_ms;
+        if (rc522->tag_was_present_last_time) {
+            // 如果上次有标签存在，则增加延迟间隔，以减少扫描频率。
+            delay_interval_ms *= 2;
         }
 
+        // 延迟一定时间，等待下一次扫描。
         vTaskDelay(delay_interval_ms / portTICK_PERIOD_MS);
     }
 
+    // 任务结束时删除自身。
     vTaskDelete(NULL);
 }

@@ -1,32 +1,31 @@
 #pragma once
 
 typedef enum rc522_reg {
-    // Starts and stops command execution
-    RC522_REG_COMMAND =             0x01,
+    RC522_REG_COMMAND =             0x01, // Starts and stops command execution
     // Communication Interrupt Enable Register.
     // Control bits to enable and disable the passing of interrupt requests
     RC522_REG_COMM_IRQ_EN =         0x02,
     // Diverted Interrupt Enable Register.
     // Control bits to enable and disable the passing of interrupt requests
     RC522_REG_DIV_IRQ_EN =          0x03,
-    // Communication Interrupt request bits
-    RC522_REG_COMM_IRQ_REQ =        0x04,
-    // Diverted Interrupt request bits
-    RC522_REG_DIV_IRQ_REQ =         0x05,
+    RC522_REG_COMM_IRQ =            0x04, // Communication Interrupt request bits
+    RC522_REG_DIV_IRQ =             0x05, // Diverted Interrupt request bits
     // Error bits showing the error status of the last command  executed
     RC522_REG_ERROR =               0x06,
+    RC522_REG_STATUS_1 =            0x07, // communication status bits
     // Contains status bits of the receiver, transmitter and data mode detector
-    RC522_REG_STATUS_2 =             0x08,
-    // Input and output of 64 byte FIFO buffer
-    RC522_REG_FIFO_DATA =           0x09,
-    // Number of bytes stored in the FIFO buffer
-    RC522_REG_FIFO_LEVEL =          0x0A,
-    // Miscellaneous control register
-    RC522_REG_CONTROL =             0x0C,
-    // Adjustments for bit-oriented frames
-    RC522_REG_BIT_FRAMING =         0x0D,
+    RC522_REG_STATUS_2 =            0x08,
+    RC522_REG_FIFO_DATA =           0x09, // Input and output of 64 byte FIFO buffer
+    RC522_REG_FIFO_LEVEL =          0x0A, // Number of bytes stored in the FIFO buffer
+    RC522_REG_WATER_LEVEL =         0x0A, // level for FIFO underflow and overflow warning
+    RC522_REG_CONTROL =             0x0C, // Miscellaneous control register
+    RC522_REG_BIT_FRAMING =         0x0D, // Adjustments for bit-oriented frames
+    // bit position of the first bit-collision detected on the RF interface
+    RC522_REG_COLL =                0x0E,
     // Defines general modes for transmitting and receiving
     RC522_REG_MODE =                0x11,
+    RC522_REG_TX_MODE =             0x12, // defines transmission data rate and framing
+    RC522_REG_RX_MODE =             0x13, // defines reception data rate and framing
     // Controls the logical behavior of the antenna driver pins TX1 and TX2
     RC522_REG_TX_CONTROL =          0x14,
     // Controls the setting of the transmission modulation

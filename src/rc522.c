@@ -212,7 +212,7 @@ static esp_err_t rc522_antenna_on(rc522_handle_t rc522) {
     }
 
     // 设置RF配置寄存器以获得43dB的增益，这是启动天线所需的配置
-    return rc522_write(rc522, RC522_REG_RF_CFG, 0x60); // 43db gain
+    return rc522_write(rc522, RC522_REG_RF_CFG, RC522_RX_43DB << 4); // 43db gain
 }
 
 static void config_cpy(rc522_config_t * dst, const rc522_config_t * src) {
@@ -433,14 +433,14 @@ static esp_err_t rc522_calculate_crc(rc522_handle_t rc522, uint8_t *data, uint8_
     uint8_t nn = 0; // 读取的中断请求寄存器的值
 
     // 准备CRC计算
-    ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_REG_DIV_IRQ_REQ, 0x04)); // 清除DIV_IRQ_REQ寄存器的特定位
+    ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_REG_DIV_IRQ, 0x04)); // 清除DIV_IRQ_REQ寄存器的特定位
     ESP_ERR_RET_GUARD(rc522_set_bitmask(rc522, RC522_REG_FIFO_LEVEL, 0x80)); // 设置FIFO_LEVEL寄存器的特定位
     ESP_ERR_RET_GUARD(rc522_send(rc522, RC522_REG_FIFO_DATA, data, n)); // 将数据发送到FIFO数据寄存器
     ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_COMMAND, RC522_CMD_CALC_CRC)); // 写入命令寄存器，开始CRC计算
 
     // 循环等待CRC计算完成
     for(;;) {
-        ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_DIV_IRQ_REQ, &nn)); // 读取DIV_IRQ_REQ寄存器的值
+        ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_DIV_IRQ, &nn)); // 读取DIV_IRQ_REQ寄存器的值
 
         i--; // 延时循环计数器递减
 
@@ -498,7 +498,7 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t
     // 设置通信中断使能寄存器
     ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_REG_COMM_IRQ_EN, irq | 0x80));
     // 清除通信中断请求寄存器的相应位
-    ESP_ERR_JMP_GUARD(rc522_clear_bitmask(rc522, RC522_REG_COMM_IRQ_REQ, 0x80));
+    ESP_ERR_JMP_GUARD(rc522_clear_bitmask(rc522, RC522_REG_COMM_IRQ, 0x80));
     // 设置FIFO水平寄存器的相应位
     ESP_ERR_JMP_GUARD(rc522_set_bitmask(rc522, RC522_REG_FIFO_LEVEL, 0x80));
     // 发送空闲命令
@@ -519,7 +519,7 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t
     // 等待中断请求
     for(;;) {
         // 读取通信中断请求寄存器
-        ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_REG_COMM_IRQ_REQ, &nn));
+        ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_REG_COMM_IRQ, &nn));
 
         // 超时计数减一
         i--;

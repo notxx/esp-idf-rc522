@@ -14,17 +14,8 @@ static const char * TAG = "rc522";
 
 #define EVENT_BIT_HARDWARE_READY BIT0
 
-/**
- * @brief Macro for safely freeing memory.
- *        This macro checks if the pointer is not NULL before calling the free function.
- *        After freeing the memory, it sets the pointer to NULL to prevent dangling pointer issues.
- *        This helps in avoiding double free errors and improves the safety of memory management.
- * @param ptr Pointer to the memory to be freed.
- */
-#define FREE(ptr) \
-    if (ptr) { free(ptr); ptr = NULL; }
-
 struct rc522 {
+    uint8_t rxbuf[0x80];
     bool running;                          /*<! Indicates whether rc522 task is running or not */
     rc522_config_t config;                /*<! Configuration */
     TaskHandle_t task_handle;              /*<! Handle of task */
@@ -413,9 +404,6 @@ static uint64_t rc522_sn_to_u64(uint8_t* sn)
     return result;
 }
 
-// Buffer should be length of 2, or more
-// Only first 2 elements will be used where the result will be stored
-// TODO: Use 2+ bytes data type instead of buffer array
 /**
  * 计算CRC值
  * 
@@ -424,10 +412,10 @@ static uint64_t rc522_sn_to_u64(uint8_t* sn)
  * @param rc522 RC522模块的句柄
  * @param data 需要计算CRC的数据数组
  * @param n 数据数组的长度
- * @param buffer 存储计算结果的缓冲区（数组长度至少为2）
+ * @param result 存储计算结果的缓冲区（数组长度至少为2）
  * @return esp_err_t 返回操作结果，ESP_OK表示成功
  */
-static esp_err_t rc522_calculate_crc(rc522_handle_t rc522, uint8_t *data, uint8_t n, uint8_t buffer[2]) {
+static esp_err_t rc522_calculate_crc(rc522_handle_t rc522, uint8_t * data, uint8_t n, uint8_t (*result)[2]) {
     esp_err_t err = ESP_OK; // 初始化操作结果为成功
     uint8_t i = 255; // 用于延时循环的计数器
     uint8_t nn = 0; // 读取的中断请求寄存器的值
@@ -454,37 +442,30 @@ static esp_err_t rc522_calculate_crc(rc522_handle_t rc522, uint8_t *data, uint8_
 
     // 读取CRC结果
     ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_CRC_RESULT_LSB, &tmp)); // 读取CRC结果的低字节
-    buffer[0] = tmp;
+    (*result)[0] = tmp;
     ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_CRC_RESULT_MSB, &tmp)); // 读取CRC结果的高字节
-    buffer[1] = tmp;
+    (*result)[1] = tmp;
 
     return ESP_OK; // 返回操作成功
 }
 
-// RC522卡写入函数
-// @param rc522: RC522设备句柄
-// @param cmd: 发送给RC522的命令
-// @param data: 发送的数据
-// @param n: 发送数据的长度
-// @param res_n: 接收数据的长度
-// @param result: 接收数据的指针
-// @return: 操作结果，ESP_OK表示成功
-static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t * data, uint8_t n, uint8_t * res_n, uint8_t ** result) {
-    // 错误码
-    esp_err_t err = ESP_OK;
-    // 接收数据指针
-    uint8_t* _result = NULL;
-    // 接收数据长度
-    uint8_t _res_n = 0;
-    // 中断请求寄存器值
-    uint8_t irq = 0x00;
-    // 中断等待寄存器值
-    uint8_t irq_wait = 0x00;
-    // 最后几位变量
-    uint8_t last_bits = 0;
-    // 临时变量
-    uint8_t nn = 0;
-    uint8_t tmp;
+/**
+ * @brief RC522卡写入函数
+ * @param rc522: RC522设备句柄
+ * @param cmd: 发送给RC522的命令
+ * @param data: 发送的数据
+ * @param n: 发送数据的长度
+ * @param rxbits: 接收数据的位长度
+ * @return: 操作结果，ESP_OK表示成功
+ */
+static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t * data, uint8_t n, uint8_t * rxbits) {
+    esp_err_t err = ESP_OK; // 错误码
+    uint8_t _rxlen = 0; // 接收数据长度
+    uint8_t irq = 0x00; // 中断请求寄存器值
+    uint8_t irq_wait = 0x00; // 中断等待寄存器值
+    uint8_t last_bits = 0; // 最后几位变量
+    uint8_t nn = 0; // 临时变量
+    uint8_t tmp; // 临时变量
     
     // 根据命令设置中断请求和中断等待寄存器值
     if (cmd == RC522_CMD_AUTHENT) {
@@ -495,34 +476,23 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t
         irq_wait = 0x30;
     }
 
-    // 设置通信中断使能寄存器
-    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_REG_COMM_IRQ_EN, irq | 0x80));
-    // 清除通信中断请求寄存器的相应位
-    ESP_ERR_JMP_GUARD(rc522_clear_bitmask(rc522, RC522_REG_COMM_IRQ, 0x80));
-    // 设置FIFO水平寄存器的相应位
-    ESP_ERR_JMP_GUARD(rc522_set_bitmask(rc522, RC522_REG_FIFO_LEVEL, 0x80));
-    // 发送空闲命令
-    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_REG_COMMAND, RC522_CMD_IDLE));
-    // 发送数据到FIFO
-    ESP_ERR_JMP_GUARD(rc522_send(rc522, RC522_REG_FIFO_DATA, data, n));
-    // 发送命令
-    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_REG_COMMAND, cmd));
+    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_COMM_IRQ_EN, irq | 0x80)); // 设置通信中断使能寄存器
+    ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_REG_COMM_IRQ, 0x80)); // 清除通信中断请求寄存器的相应位
+    ESP_ERR_RET_GUARD(rc522_set_bitmask(rc522, RC522_REG_FIFO_LEVEL, 0x80)); // 设置FIFO水平寄存器的相应位
+    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_COMMAND, RC522_CMD_IDLE)); // 发送空闲命令
+    ESP_ERR_RET_GUARD(rc522_send(rc522, RC522_REG_FIFO_DATA, data, n)); // 发送数据到FIFO
+    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_COMMAND, cmd)); // 发送命令
 
-    // 如果是TRANSCEIVE命令，设置位帧寄存器
-    if (cmd == RC522_CMD_TRANSCEIVE) {
-        ESP_ERR_JMP_GUARD(rc522_set_bitmask(rc522, RC522_REG_BIT_FRAMING, 0x80));
+    if (cmd == RC522_CMD_TRANSCEIVE) { // 如果是TRANSCEIVE命令，设置位帧寄存器
+        ESP_ERR_RET_GUARD(rc522_set_bitmask(rc522, RC522_REG_BIT_FRAMING, 0x80));
     }
 
-    // 设置超时计数器
-    uint16_t i = 1000;
+    uint16_t i = 1000; // 设置超时计数器
 
-    // 等待中断请求
-    for(;;) {
-        // 读取通信中断请求寄存器
-        ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_REG_COMM_IRQ, &nn));
+    for(;;) { // 等待中断请求
+        ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_COMM_IRQ, &nn)); // 读取通信中断请求寄存器
 
-        // 超时计数减一
-        i--;
+        i--; // 超时计数减一
 
         // 判断是否满足中断条件或超时
         if (!(i != 0 && (((nn & 0x01) == 0) && ((nn & irq_wait) == 0)))) {
@@ -530,58 +500,37 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t
         }
     }
 
-    // 清除位帧寄存器的相应位
-    ESP_ERR_JMP_GUARD(rc522_clear_bitmask(rc522, RC522_REG_BIT_FRAMING, 0x80));
+    ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_REG_BIT_FRAMING, 0x80)); // 清除位帧寄存器的相应位
 
-    // 如果没有超时
-    if (i != 0) {
-        // 读取错误寄存器
-        ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_REG_ERROR, &tmp));
+    if (i != 0) { // 如果没有超时
+        ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_ERROR, &tmp)); // 读取错误寄存器
 
-        // 如果没有错误
-        if ((tmp & 0x1B) == 0) {
+        if ((tmp & 0x1B) == 0) { // 如果没有错误
             if (cmd == RC522_CMD_TRANSCEIVE) {
-                // 读取FIFO水平寄存器
-                ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_REG_FIFO_LEVEL, &nn));
-                // 读取控制寄存器
-                ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_REG_CONTROL, &tmp));
+                ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_FIFO_LEVEL, &nn)); // 读取FIFO水平寄存器
+                ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_CONTROL, &tmp)); // 读取控制寄存器
 
-                // 获取最后几位
-                last_bits = tmp & 0x07;
+                last_bits = tmp & 0x07; // 获取最后几位
 
-                // 如果最后几位不为0
-                if (last_bits != 0) {
-                    // 计算接收数据长度
-                    _res_n = (nn - 1) + last_bits;
+                if (last_bits != 0) { // 如果最后几位不为0
+                    ESP_LOGI(TAG, "last_bits: %d", last_bits);
+                    *rxbits = ((nn - 1) << 3) + last_bits; // 计算接收数据长度
                 } else {
-                    // 直接使用FIFO水平寄存器的值
-                    _res_n = nn;
+                    *rxbits = nn << 3; // 直接使用FIFO水平寄存器的值
                 }
 
-                // 如果有数据接收
-                if (_res_n > 0) {
-                    // 分配接收数据的内存
-                    ALLOC_JMP_GUARD(_result = (uint8_t*) malloc(_res_n));
+                if (nn == 0) nn = 1;
 
-                    // 逐个读取数据
-                    for(i = 0; i < _res_n; i++) {
-                        ESP_ERR_JMP_GUARD(rc522_read(rc522, RC522_REG_FIFO_DATA, &tmp));
-                        _result[i] = tmp;
-                    }
+                memset(rc522->rxbuf, 0, sizeof(rc522->rxbuf));
+                for (i = 0; i < nn; i++) { // 逐个读取数据
+                    ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_FIFO_DATA, &tmp));
+                    rc522->rxbuf[i] = tmp;
                 }
             }
         }
+    } else {
+        err = ESP_ERR_TIMEOUT;
     }
-
-    // 处理异常情况，释放分配的内存
-    JMP_GUARD_GATES({
-        FREE(_result);
-        _res_n = 0;
-    }, {
-        // 正常情况，返回接收数据长度和数据指针
-        *res_n = _res_n;
-        *result = _result;
-    });
 
     // 返回操作结果
     return err;
@@ -595,81 +544,65 @@ static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t
  * 
  * @param rc522 RC522设备的句柄
  * @param req_mode 请求模式，用于指定如何从RC522读取标签响应
- * @param res_n 指向一个变量的指针，用于存储返回的响应数据的长度
- * @param result 指向一个指针的指针，用于存储返回的响应数据
+ * @param tag_type 卡类型
  * @return esp_err_t 返回操作结果，ESP_OK表示成功，其他值表示错误
  */
-static esp_err_t rc522_request(rc522_handle_t rc522, uint8_t req_mode, uint8_t * res_n, uint8_t ** result) {
-    esp_err_t err = ESP_OK; // 初始化错误码为ESP_OK
-    uint8_t* _result = NULL; // 初始化接收结果的指针
-    uint8_t _res_n = 0; // 初始化接收结果的长度
+static esp_err_t rc522_request(rc522_handle_t rc522, uint8_t req_mode, uint8_t (*tag_type)[2]) {
+    esp_err_t err = ESP_OK;
+    // uint8_t _result[2] = { 0 }; // 接收结果的指针
+    uint8_t _rxbits; // 初始化接收结果的长度
 
+    ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_REG_STATUS_2, 0x08));
     // 设置RC522的位帧寄存器，准备接收数据
     ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x07));
+    ESP_ERR_RET_GUARD(rc522_set_bitmask(rc522, RC522_REG_TX_CONTROL, 0x03));
     
     // 向RC522发送传输接收命令
-    ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, &req_mode, 1, &_res_n, &_result));
+    ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, &req_mode, 1, &_rxbits));
 
     // 检查接收到的数据长度是否符合预期，不符合则释放资源并返回错误
-    if (_res_n * 8 != 0x10) {
-        free(_result);
+    if (_rxbits != 16) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    // 将接收到的数据长度和数据指针返回给调用者
-    *res_n = _res_n;
-    *result = _result;
+    (*tag_type)[0] = rc522->rxbuf[0];
+    (*tag_type)[1] = rc522->rxbuf[1];
 
     return err; // 返回操作结果
 }
 
-static esp_err_t rc522_select(rc522_handle_t rc522)
-{
+static esp_err_t rc522_select(rc522_handle_t rc522, uint8_t uid[5]) {
     esp_err_t err = ESP_OK;
-    uint8_t* _result = NULL;
-    uint8_t _res_n;
+    uint8_t data[9] = { 0x93, 0x70, uid[0], uid[1], uid[2], uid[3], uid[4], 0, 0 };
+    // uint8_t data[2] = { 0x93, 0x70 };
+    uint8_t _rxbits;
 
-    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
-    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) MIFARE_SELECT_CL_1, 2, &_res_n, &_result));
+    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
+    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, data, 7, data + 7)); // TODO
+    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_STATUS_2, 0x08));
+    ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, data, sizeof(data), &_rxbits));
 
-    printf("#### SAK ? length %d, first byte \n", _res_n);
-
-
-    JMP_GUARD_GATES({
-        FREE(_result);
-        _res_n = 0;
-    }, {
-        
-    });
+    if (_rxbits != 0x18) {
+        ESP_LOGI(TAG, "##select ? _rxbits %02X", _rxbits);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
 
     return err;
 }
 
-static esp_err_t rc522_picc_wakeup(rc522_handle_t rc522)
-{
+static esp_err_t rc522_picc_wakeup(rc522_handle_t rc522) {
     esp_err_t err = ESP_OK;
 
-    uint8_t* res_data = NULL;
-    uint8_t res_data_n;
+    uint8_t tag_type[2];
 
-    ESP_ERR_JMP_GUARD(rc522_request(rc522, MIFARE_WUPA, &res_data_n, &res_data));
+    ESP_ERR_RET_GUARD(rc522_request(rc522, MIFARE_WUPA, &tag_type));
 
-    if(res_data_n != 2 || (res_data_n == 2 && (res_data[1] != 0x00 || res_data[0] != 0x04))) {
+    if(tag_type[1] != 0x00 || tag_type[0] != 0x04) {
         err = ESP_ERR_INVALID_STATE; 
-        FREE(res_data);
-        res_data_n = 0;
     } else {
-        printf(" >> Wakeup  0x%02x%02x \n", res_data[1], res_data[0]);
+        printf(" >> Wakeup  0x%02x%02x \n", tag_type[1], tag_type[0]);
     }
     
-    JMP_GUARD_GATES({
-        FREE(res_data);
-        res_data_n = 0;
-    }, {
-        FREE(res_data);
-        res_data_n = 0;
-    });
-
     return err;
 }
 
@@ -683,121 +616,131 @@ static esp_err_t rc522_picc_wakeup(rc522_handle_t rc522)
  * @param result 返回识别出的RFID卡的UID指针
  * @return esp_err_t 返回操作的错误码
  */
-static esp_err_t rc522_anticoll(rc522_handle_t rc522, uint8_t ** result) {
+static esp_err_t rc522_anticoll(rc522_handle_t rc522, uint8_t (*result)[5]) {
     esp_err_t err = ESP_OK; // 初始化错误码为成功
-    uint8_t* _result = NULL; // 用于存储返回的UID
-    uint8_t _res_n; // 存储返回的长度
+    uint8_t _rxbits; // 存储返回的长度
 
+    ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_REG_STATUS_2, 0x08));
     // 设置位帧寄存器为0x00，准备进行防冲突操作
-    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
-    // 向读写器发送防冲突命令和相关数据，获取唯一卡的UID
-    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) MIFARE_ANTICOLLISION_CL_1, 2, &_res_n, &_result));
+    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
+    ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_REG_COLL, 0x80));
 
-    // TODO: Some cards have length of 4, and some of them have length of 7 bytes
-    //       here we are using one extra byte which is not part of UID.
-    //       Implement logic to determine the length of the UID and use that info
-    //       to retrieve the serial number aka UID
-    if (_result && _res_n != 5) { // all cards/tags serial numbers is 5 bytes long (??)
-        ESP_ERR_LOG_AND_JMP_GUARD(ESP_ERR_INVALID_RESPONSE, "invalid length of serial number");
+    // 向读写器发送防冲突命令和相关数据，获取唯一卡的UID
+    ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) MIFARE_ANTICOLLISION_CL_1, 2, &_rxbits));
+
+    if (_rxbits != 40) { // 5 bytes
+        return ESP_ERR_INVALID_RESPONSE;
     }
 
-    // printf("#### First byte is Cascade TAG 0x88 ? 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x) \n", _result[0], _result[1], _result[2], _result[3], _result[4]);
+    ESP_ERR_RET_GUARD(rc522_set_bitmask(rc522, RC522_REG_COLL, 0x80));
 
-    JMP_GUARD_GATES({
-        FREE(_result);
-        _res_n = 0;
-    }, {
-        *result = _result;
-    });
+    uint8_t bcrc = 0;
+    for (size_t i = 0; i < 5; i++) {
+        bcrc ^= rc522->rxbuf[i];
+    }
+    if (bcrc != 0) {
+        return ESP_ERR_INVALID_CRC;
+    }
+    
+    memcpy(*result, rc522->rxbuf, 5);
 
     return err;
 }
 
-static esp_err_t rc522_stop_picc_communication(rc522_handle_t rc522)
-{
+static esp_err_t rc522_anticoll2(rc522_handle_t rc522, uint8_t (*result)[4]) {
+    esp_err_t err = ESP_OK; // 初始化错误码为成功
+    uint8_t _rxbits; // 存储返回的长度
+
+    // ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_REG_STATUS_2, 0x08));
+    // 设置位帧寄存器为0x00，准备进行防冲突操作
+    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
+    // ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_REG_COLL, 0x80));
+
+    // 向读写器发送防冲突命令和相关数据，获取唯一卡的UID
+    ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, (uint8_t[]) MIFARE_ANTICOLLISION_CL_2, 2, &_rxbits));
+
+    ESP_ERR_RET_GUARD(rc522_set_bitmask(rc522, RC522_REG_COLL, 0x80));
+
+    uint8_t bcrc = 0;
+    for (size_t i = 0; i < 5; i++) {
+        bcrc ^= rc522->rxbuf[i];
+    }
+    if (bcrc != 0) {
+        return ESP_ERR_INVALID_CRC;
+    }
+    
+    memcpy(*result, rc522->rxbuf, 4);
+
+    return err;
+}
+
+static esp_err_t rc522_stop_picc_communication(rc522_handle_t rc522) {
 
     esp_err_t err = ESP_OK;
     /*
         This part stops the communication with the picc by issuing a HALT_A as well as STOP_CRYPTO1
     */
-    uint8_t* res_data = NULL;
-    uint8_t res_data_n;
+    uint8_t _rxbits;
 
     // Issue a HALT_A
     uint8_t buf[4];
     memcpy(buf, (uint8_t[])MIFARE_HALT, 2);
     memcpy(buf + 2, (uint8_t[]){ 0x00, 0x00 }, 2);
-    ESP_ERR_JMP_GUARD(rc522_calculate_crc(rc522, buf, 2, buf + 2));
-    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, buf, 4, &res_data_n, &res_data));
-    FREE(res_data);
+    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, buf, 2, buf + 2));
+    ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, buf, 4, &_rxbits));
     // Stop CYPTO1
     // Clear MFCrypto1On bit
-    ESP_ERR_JMP_GUARD(rc522_clear_bitmask(rc522, RC522_REG_STATUS_2, 0x08));
-
-    JMP_GUARD_GATES({
-        FREE(res_data);
-    }, {
-        // Nothing to do if everything went fine
-    });
+    ESP_ERR_RET_GUARD(rc522_clear_bitmask(rc522, RC522_REG_STATUS_2, 0x08));
 
     return err;
 }
 
 /**
- * @brief 从RC522读取标签
+ * 从RC522读取标签的序列号
  * 
- * 本函数尝试从RC522读取一个标签。它首先发送一个请求来激活标签，然后通过防冲突机制选择一个特定的标签，
- * 最后停止与标签的通信。如果成功读取到标签，将返回标签信息的指针。
+ * 此函数通过发送请求、防冲突和选择标签等步骤，来识别并返回标签的序列号
+ * 它处理两种类型的序列号：4字节和7字节，并在通信结束后停止与标签的通信
  * 
- * @param rc522 RC522设备的句柄，用于操作RC522芯片。
- * @param result 输出参数，返回读取到的标签信息的指针。
- * @return esp_err_t 表示操作是否成功的错误码。
+ * @param rc522 RC522设备的句柄
+ * @param result 指向存储标签序列号的变量指针
+ * @return esp_err_t 类型的错误代码，指示函数执行的结果
  */
-static esp_err_t rc522_get_tag(rc522_handle_t rc522, uint8_t ** result) {
-    // 初始化错误码为成功
+static esp_err_t rc522_get_tag(rc522_handle_t rc522, serial_no_t * result) {
     esp_err_t err = ESP_OK;
-    // 用于存储标签信息的指针，初始为NULL
-    uint8_t * _result = NULL;
-    // 临时存储从RC522读取到的数据
-    uint8_t * res_data = NULL;
-    // 读取到的数据的字节数
-    uint8_t res_data_n;
 
+    uint8_t tag_type[2] = { 0 };
     // 发送请求以激活标签
-    ESP_ERR_JMP_GUARD(rc522_request(rc522, MIFARE_REQA, &res_data_n, &res_data));
+    ESP_ERR_RET_GUARD(rc522_request(rc522, MIFARE_REQA, &tag_type));
 
-    // 如果成功读取到数据
-    if (res_data != NULL) {
-        // 释放读取到的数据内存
-        FREE(res_data);
-        // 通过防冲突机制选择一个特定的标签
-        ESP_ERR_JMP_GUARD(rc522_anticoll(rc522, &_result));
+    uint8_t segment[5] = { 0 }; // 卡号（没有折叠的情况下）或者卡号的第一部分（折叠的情况下）
+    ESP_ERR_RET_GUARD(rc522_anticoll(rc522, &segment));
+    ESP_ERR_RET_GUARD(rc522_select(rc522, segment));
 
-        // 如果成功选择到标签
-        if (_result != NULL) {
-            // 停止与标签的通信
-            ESP_ERR_JMP_GUARD(rc522_stop_picc_communication(rc522));
+    if (segment[0] != 0x88) { // 卡号没有折叠
+        result->type = SERIAL_NO_TYPE_4;
+        memcpy(result->data, segment, 4);
+    } else {
+        uint8_t segment2[4] = { 0 }; // 卡号的第二部分，三级折叠的情况下还有第三部分
+        ESP_ERR_RET_GUARD(rc522_anticoll2(rc522, &segment2));
+
+        if (segment2[0] != 0x88) { // 卡号没有三级折叠
+            result->type = SERIAL_NO_TYPE_7;
+            memcpy(result->data, &segment[1], 3);
+            memcpy(&(result->data[3]), segment2, 4);
+        } else {
+            // TODO
         }
     }
+    // 停止与标签的通信
+    ESP_ERR_RET_GUARD(rc522_stop_picc_communication(rc522));
 
-    // 异常处理，确保资源被正确释放
-    JMP_GUARD_GATES({
-        FREE(_result);
-        FREE(res_data);
-    }, {
-        *result = _result;
-    });
-
-    // 返回操作是否成功的错误码
     return err;
 }
 
 
-static esp_err_t rc522_authenticate(rc522_handle_t rc522, uint8_t auth_key, uint8_t blockAddr, MIFARE_Key* key)
-{
+static esp_err_t rc522_authenticate(rc522_handle_t rc522, uint8_t auth_key, uint8_t blockAddr, MIFARE_Key * key) {
     esp_err_t err = ESP_OK;
-    uint8_t* res_data = NULL;
-    uint8_t res_data_n;
+    uint8_t _rxbits;
 
     uint8_t buf[12];
     buf[0] = auth_key;
@@ -805,14 +748,8 @@ static esp_err_t rc522_authenticate(rc522_handle_t rc522, uint8_t auth_key, uint
     memcpy(buf + 2, key->keyByte, 6);
     memcpy(buf + 8, rc522->tag_uid, 4);
 
-    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
-    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_AUTHENT, buf, 12, &res_data_n, &res_data));
-
-    JMP_GUARD_GATES({
-        FREE(res_data);
-    }, {
-        // Nothing to do if the authentication worked
-    });
+    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
+    ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_AUTHENT, buf, 12, &_rxbits));
 
     return err;
 }
@@ -823,28 +760,27 @@ static esp_err_t  rc522_read_block_from_picc(rc522_handle_t rc522, uint8_t block
 											uint8_t *bufferSize	///< Buffer size, at least 18 bytes. Also number of bytes returned if STATUS_OK.
 										) {
     esp_err_t err = ESP_OK;
+    uint8_t _rxbits;
 
     // Sanity checks
-    CONDITION_LOG_AND_JMP_GUARD((buffer == NULL), "The buffer pointer is null, PICC's block cannot be read");
-    CONDITION_LOG_AND_JMP_GUARD((*bufferSize < 18), "The buffer reading a block from the PICC is small, increase the size to atleast 18 bytes");
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "The buffer pointer is null, PICC's block cannot be read");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (*bufferSize < 18) {
+        ESP_LOGE(TAG, "The buffer reading a block from the PICC is small, increase the size to atleast 18 bytes");
+        return ESP_ERR_INVALID_ARG;
+    }
 
 	// Build command buffer
 	buffer[0] = MIFARE_READ;
 	buffer[1] = blockAddr;
 	// Calculate CRC_A
-    ESP_ERR_JMP_GUARD(rc522_calculate_crc(rc522, buffer, 2, buffer + 2));
+    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, buffer, 2, &buffer[2]));
 
     // Transmit the buffer and receive the response, validate CRC_A.
-    ESP_ERR_JMP_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
-    ESP_ERR_JMP_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, buffer, 4, bufferSize, &buffer));
-
-
-	JMP_GUARD_GATES({
-        FREE(buffer);
-        *bufferSize = 0;
-    }, {
-        // Nothing to do if everything went fine
-    });
+    ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
+    ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, buffer, 4, &_rxbits));
 
     return err;
 }
@@ -874,6 +810,7 @@ static esp_err_t rc522_read_sector_from_picc(rc522_handle_t rc522, MIFARE_Key* k
     // Dump blocks, highest address first.
 	uint8_t byteCount;
 	uint8_t buffer[18];
+    uint8_t tag_type[2];
 	uint8_t blockAddr;
 	bool isSectorTrailer = true;
 	bool invertedError = false;	// Avoid "unused variable" warning.
@@ -899,25 +836,17 @@ static esp_err_t rc522_read_sector_from_picc(rc522_handle_t rc522, MIFARE_Key* k
 		printf("  ");
         // Establish encrypted communications before reading the first block
 		if (isSectorTrailer) {
-            uint8_t* res_data = NULL;
-            uint8_t res_data_n;
-            ESP_ERR_JMP_GUARD(rc522_request(rc522, MIFARE_WUPA, &res_data_n, &res_data));
-            if (res_data != NULL) {
-                ESP_ERR_JMP_GUARD(rc522_authenticate(rc522, MIFARE_AUTH_KEY_A, firstBlock, key));
+            ESP_ERR_RET_GUARD(rc522_request(rc522, MIFARE_WUPA, &tag_type));
+            if (tag_type[0] != 0) {
+                ESP_ERR_RET_GUARD(rc522_authenticate(rc522, MIFARE_AUTH_KEY_A, firstBlock, key));
             }
-            FREE(res_data);
-            res_data_n = 0;
 		}
         // Read block
 		byteCount = sizeof(buffer);
-        uint8_t* res_data = NULL;
-        uint8_t res_data_n;
-        ESP_ERR_JMP_GUARD(rc522_request(rc522, MIFARE_WUPA, &res_data_n, &res_data));
-        if (res_data != NULL) {
-		    ESP_ERR_JMP_GUARD(rc522_read_block_from_picc(rc522, blockAddr, buffer, &byteCount));
+        ESP_ERR_RET_GUARD(rc522_request(rc522, MIFARE_WUPA, &tag_type));
+        if (tag_type[0] != 0) {
+		    ESP_ERR_RET_GUARD(rc522_read_block_from_picc(rc522, blockAddr, buffer, &byteCount));
         }
-        FREE(res_data);
-        res_data_n = 0;
 		// Dump data
 		for (uint8_t index = 0; index < 16; index++) {
 			printf(" 0x%02x", buffer[index]);
@@ -972,12 +901,6 @@ static esp_err_t rc522_read_sector_from_picc(rc522_handle_t rc522, MIFARE_Key* k
 		printf("\n");
     }
 
-    JMP_GUARD_GATES({
-        // TODO
-    }, {
-        // Nothing to do if everything went fine
-    });
-    
     return err;
 }
 
@@ -1060,7 +983,6 @@ esp_err_t rc522_start(rc522_handle_t rc522) {
                 }
             }
         }
-        xTaskNotify(rc522->task_handle, EVENT_BIT_HARDWARE_READY, eSetBits);
         // ------- 读写测试结束 --------
 
         // 执行必要的寄存器配置以初始化RC522模块。
@@ -1080,6 +1002,7 @@ esp_err_t rc522_start(rc522_handle_t rc522) {
 
         // 记录固件版本。
         ESP_LOGI(TAG, "Initialized (firmware v%d.0)", (tmp & 0x03));
+        xTaskNotify(rc522->task_handle, EVENT_BIT_HARDWARE_READY, eSetBits);
     }
 
     rc522->scanning = true;
@@ -1184,7 +1107,7 @@ esp_err_t rc522_destroy(rc522_handle_t rc522) {
         rc522->event_handle = NULL; // 将事件句柄置空
     }
 
-    FREE(rc522); // 释放RC522设备句柄内存
+    free(rc522); // 释放RC522设备句柄内存
 
     return err; // 返回操作结果
 }
@@ -1363,44 +1286,38 @@ static void rc522_task(void* arg) {
         }
 
         // 用于存储标签的序列号的指针。
-        uint8_t * serial_no_array = NULL;
+        serial_no_t serial_no = { 0 };
 
         // 调用rc522_get_tag函数尝试获取标签的序列号。
-        if (ESP_OK != rc522_get_tag(rc522, &serial_no_array)) {
+        if (ESP_OK != rc522_get_tag(rc522, &serial_no)) {
             // 如果获取失败，可能是没有标签靠近或者通信问题。
             // TODO: 需要实现逻辑来判断是标签不存在还是其他协议问题。
         }
         
         // 检查是否成功获取到标签的序列号。
-        if (!serial_no_array) {
+        if (serial_no.type == SERIAL_NO_TYPE_NONE) {
             // 如果没有获取到序列号，重置上次标签存在状态。
             rc522->tag_was_present_last_time = false;
         } else if (!rc522->tag_was_present_last_time) {
             // 如果上次没有标签，现在获取到了，则记录标签信息并触发事件。
-            memcpy(rc522->tag_uid, serial_no_array, 32);
-            rc522_tag_t tag = {
-                .serial_number = rc522_sn_to_u64(serial_no_array),
-            };
-            FREE(serial_no_array);
-            rc522_dispatch_event(rc522, RC522_EVENT_TAG_SCANNED, &tag);
+            rc522_dispatch_event(rc522, RC522_EVENT_TAG_SCANNED, &serial_no);
             rc522->tag_was_present_last_time = true;
 
             // 尝试进行身份验证。
+            /*
             MIFARE_Key key;
             for (uint8_t i = 0; i < 6; i++) {
                 key.keyByte[i] = 0xff;
             }
             rc522_read_data_from_picc(rc522, &key);
-        } else {
-            // 如果上次已经有标签存在，则释放序列号数组。
-            FREE(serial_no_array);
+            */
         }
 
         // 计算下一次扫描的延迟间隔。
         int delay_interval_ms = rc522->config.scan_interval_ms;
         if (rc522->tag_was_present_last_time) {
             // 如果上次有标签存在，则增加延迟间隔，以减少扫描频率。
-            delay_interval_ms *= 2;
+            delay_interval_ms <<= 1;
         }
 
         // 延迟一定时间，等待下一次扫描。

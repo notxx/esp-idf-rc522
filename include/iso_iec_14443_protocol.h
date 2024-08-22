@@ -11,6 +11,7 @@
 #define MIFARE_REQA                0x26
 #define MIFARE_WUPA                0x52
 #define MIFARE_ANTICOLLISION_CL_1  {0x93, 0x20}
+#define MIFARE_ANTICOLLISION_CL_2  {0x95, 0x20}
 #define MIFARE_SELECT_CL_1         {0x93, 0x70}
 #define MIFARE_HALT                {0x50, 0x00}
 #define MIFARE_AUTH_KEY_A          0x60
@@ -20,4 +21,4 @@
 #define MIFARE_DECREMENT           0xC0
 #define MIFARE_INCREMENT           0xC1
 #define MIFARE_RESTORE             0xC2
-#define MIFARE TRANSFER            0xB0
+#define MIFARE_TRANSFER            0xB0

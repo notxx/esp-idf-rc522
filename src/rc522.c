@@ -14,22 +14,9 @@ static const char * TAG = "rc522";
 
 #define EVENT_BIT_HARDWARE_READY BIT0
 
-struct rc522 {
-    uint8_t rxbuf[0x80];
-    bool running;                          /*<! Indicates whether rc522 task is running or not */
-    rc522_config_t config;                /*<! Configuration */
-    TaskHandle_t task_handle;              /*<! Handle of task */
-    esp_event_loop_handle_t event_handle;  /*<! Handle of event loop */
-    spi_device_handle_t spi_handle;
-    // TODO: Use new 'status' field, instead of initialized, scanning, etc...
-    bool initialized;                      /*<! Set on the first start() when configuration is sent to rc522 */
-    bool scanning;                         /*<! Whether the rc522 is in scanning or idle mode */
-    bool tag_was_present_last_time;
-    uint8_t tag_uid[32]; 
-    bool bus_initialized_by_user;          /*<! Whether the bus has been initialized manually by the user, before calling rc522_create function */
-};
-
 ESP_EVENT_DEFINE_BASE(RC522_EVENTS);
+
+typedef rc522_t * rc522_handle_t;
 
 static esp_err_t rc522_spi_send(rc522_handle_t rc522, uint8_t * buffer, uint8_t length);
 static esp_err_t rc522_spi_receive(rc522_handle_t rc522, uint8_t * buffer, uint8_t length, uint8_t addr);
@@ -275,23 +262,14 @@ static esp_err_t rc522_create_transport(rc522_handle_t rc522) {
     return err;
 }
 
-// 初始化RC522模块
-// 参数config: 指向配置结构的指针
-// 参数out_rc522: 用于存储创建的RC522实例的变量
-// 返回值: 错误码，ESP_OK表示成功，其他值表示错误
-esp_err_t rc522_create(const rc522_config_t * config, rc522_handle_t * out_rc522) {
+esp_err_t rc522_create(const rc522_config_t * config, rc522_t * rc522) {
     // 检查输入参数是否有效
-    if (!config || !out_rc522) {
+    if (!config || !rc522) {
         return ESP_ERR_INVALID_ARG;
     }
 
     // 初始化错误码为成功
     esp_err_t err = ESP_OK;
-    // 创建RC522句柄
-    rc522_handle_t rc522 = NULL;
-    
-    // 分配内存以存储RC522实例
-    ALLOC_RET_GUARD(rc522 = malloc(sizeof(rc522_handle_t)));
 
     rc522->running = false;
     config_cpy(&(rc522->config), config); // 复制配置参数
@@ -304,9 +282,12 @@ esp_err_t rc522_create(const rc522_config_t * config, rc522_handle_t * out_rc522
     rc522->bus_initialized_by_user = false;
 
     // 创建传输层
-    ESP_ERR_LOG_AND_JMP_GUARD(rc522_create_transport(
-        rc522
-    ), "Fail to create transport");
+    err = rc522_create_transport(rc522);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Fail to create transport");
+        rc522_destroy(rc522);
+        return err;
+    }
 
     // 初始化事件循环参数
     esp_event_loop_args_t event_args = {
@@ -315,31 +296,30 @@ esp_err_t rc522_create(const rc522_config_t * config, rc522_handle_t * out_rc522
     };
 
     // 创建事件循环
-    ESP_ERR_LOG_AND_JMP_GUARD(esp_event_loop_create(
-        &event_args,
-        &rc522->event_handle
-    ), "Fail to create event loop");
+    err = esp_event_loop_create(&event_args, &rc522->event_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Fail to create event loop");
+        rc522_destroy(rc522);
+        return err;
+    }
 
     // 标记RC522为运行状态
     rc522->running = true;
 
     // 创建RC522任务线程
-    CONDITION_LOG_AND_JMP_GUARD(pdTRUE != xTaskCreate(
+    BaseType_t ret = xTaskCreate(
         rc522_task,
         "rc522_task",
         rc522->config.task_stack_size,
         rc522,
         rc522->config.task_priority,
         &rc522->task_handle
-    ), "Fail to create task");
-
-    // 成功或失败的处理逻辑
-    JMP_GUARD_GATES({
+    );
+    if (pdTRUE != ret) {
+        ESP_LOGW(TAG, "Fail to create task");
         rc522_destroy(rc522);
-        rc522 = NULL;
-    }, {
-        *out_rc522 = rc522;
-    });
+        return ESP_ERR_NO_MEM;
+    }
 
     // 返回错误码
     return err;
@@ -389,6 +369,7 @@ esp_err_t rc522_unregister_events(rc522_handle_t rc522, rc522_event_t event, esp
     return esp_event_handler_unregister_with(rc522->event_handle, RC522_EVENTS, event, event_handler);
 }
 
+/* 
 static uint64_t rc522_sn_to_u64(uint8_t* sn)
 {
     uint64_t result = 0;
@@ -403,6 +384,7 @@ static uint64_t rc522_sn_to_u64(uint8_t* sn)
 
     return result;
 }
+ */
 
 /**
  * 计算CRC值
@@ -460,7 +442,6 @@ static esp_err_t rc522_calculate_crc(rc522_handle_t rc522, uint8_t * data, uint8
  */
 static esp_err_t rc522_card_write(rc522_handle_t rc522, rc522_cmd_t cmd, uint8_t * data, uint8_t n, uint8_t * rxbits) {
     esp_err_t err = ESP_OK; // 错误码
-    uint8_t _rxlen = 0; // 接收数据长度
     uint8_t irq = 0x00; // 中断请求寄存器值
     uint8_t irq_wait = 0x00; // 中断等待寄存器值
     uint8_t last_bits = 0; // 最后几位变量
@@ -578,7 +559,7 @@ static esp_err_t rc522_select(rc522_handle_t rc522, uint8_t uid[5]) {
     uint8_t _rxbits;
 
     ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
-    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, data, 7, data + 7)); // TODO
+    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, data, 7, &data[7])); // TODO
     ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_STATUS_2, 0x08));
     ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, data, sizeof(data), &_rxbits));
 
@@ -590,6 +571,7 @@ static esp_err_t rc522_select(rc522_handle_t rc522, uint8_t uid[5]) {
     return err;
 }
 
+/* 
 static esp_err_t rc522_picc_wakeup(rc522_handle_t rc522) {
     esp_err_t err = ESP_OK;
 
@@ -605,6 +587,7 @@ static esp_err_t rc522_picc_wakeup(rc522_handle_t rc522) {
     
     return err;
 }
+ */
 
 /**
  * @brief 实现RFID卡的防冲突算法
@@ -737,7 +720,7 @@ static esp_err_t rc522_get_tag(rc522_handle_t rc522, serial_no_t * result) {
     return err;
 }
 
-
+/* 
 static esp_err_t rc522_authenticate(rc522_handle_t rc522, uint8_t auth_key, uint8_t blockAddr, MIFARE_Key * key) {
     esp_err_t err = ESP_OK;
     uint8_t _rxbits;
@@ -753,7 +736,6 @@ static esp_err_t rc522_authenticate(rc522_handle_t rc522, uint8_t auth_key, uint
 
     return err;
 }
-
 
 static esp_err_t  rc522_read_block_from_picc(rc522_handle_t rc522, uint8_t blockAddr,
 											uint8_t *buffer,		///< The buffer to store the data in
@@ -888,9 +870,9 @@ static esp_err_t rc522_read_sector_from_picc(rc522_handle_t rc522, MIFARE_Key* k
 			printf("%d", (g[group] >> 1) & 1); printf(" ");
 			printf("%d", (g[group] >> 0) & 1);
 			printf(" ] ");
-			/* if (invertedError) {
+			if (invertedError) {
 				ESP_LOGW(TAG, " Inverted access bits did not match! ");
-			} */
+			}
 		}
 		
 		if (group != 3 && (g[group] == 1 || g[group] == 6)) { // Not a sector trailer, a value block
@@ -929,6 +911,7 @@ static esp_err_t rc522_read_data_from_picc(rc522_handle_t rc522, MIFARE_Key* key
     
     return err;
 }
+ */
 
 // 开始RC522模块，进入扫描模式。
 // 如果模块尚未初始化，则在开始前进行初始化。
@@ -956,7 +939,7 @@ esp_err_t rc522_start(rc522_handle_t rc522) {
         // ---------- 读写测试 ------------
         // TODO: 使用敏感度较低的寄存器进行测试，或在测试结束时将寄存器恢复到原始状态
         const rc522_reg_t test_addr = RC522_REG_MOD_WIDTH, test_val = 0x25;
-        uint8_t pass = 0;
+        // uint8_t pass = 0;
 
         for (uint8_t i = test_val; i < test_val + 2; i++) {
             // ESP_LOGI(TAG, "rc522_write(%p, %u, %u)", rc522, test_addr, i);

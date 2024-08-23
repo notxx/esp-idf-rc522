@@ -35,9 +35,6 @@ typedef struct {
     uint8_t		keyByte[6]; // A Mifare Crypto1 key is 6 bytes
 } MIFARE_Key;
 
-
-typedef struct rc522 * rc522_handle_t;
-
 typedef enum {
     RC522_TRANSPORT_SPI,
     RC522_TRANSPORT_I2C,
@@ -75,6 +72,21 @@ typedef struct {
     };
 } rc522_config_t;
 
+typedef struct {
+    uint8_t rxbuf[0x80];
+    bool running;                          /*<! Indicates whether rc522 task is running or not */
+    rc522_config_t config;                /*<! Configuration */
+    TaskHandle_t task_handle;              /*<! Handle of task */
+    esp_event_loop_handle_t event_handle;  /*<! Handle of event loop */
+    spi_device_handle_t spi_handle;
+    // TODO: Use new 'status' field, instead of initialized, scanning, etc...
+    bool initialized;                      /*<! Set on the first start() when configuration is sent to rc522 */
+    bool scanning;                         /*<! Whether the rc522 is in scanning or idle mode */
+    bool tag_was_present_last_time;
+    uint8_t tag_uid[32]; 
+    bool bus_initialized_by_user;          /*<! Whether the bus has been initialized manually by the user, before calling rc522_create function */
+} rc522_t;
+
 typedef enum {
     RC522_EVENT_ANY = ESP_EVENT_ANY_ID,
     RC522_EVENT_NONE,
@@ -82,13 +94,9 @@ typedef enum {
 } rc522_event_t;
 
 typedef struct {
-    rc522_handle_t rc522;
-    void* ptr;
+    rc522_t * rc522;
+    serial_no_t * ptr;
 } rc522_event_data_t;
-
-typedef struct {
-    uint64_t serial_number;
-} rc522_tag_t;
 
 /**
  * 初始化RC522 RFID模块。
@@ -97,14 +105,14 @@ typedef struct {
  * 如果初始化成功，RC522模块将准备好进行进一步的操作。
  * 
  * @param config 指向RC522配置参数的指针。不能为空。
- * @param out_rc522 指向一个变量的指针，该变量将接收RC522模块的句柄。不能为空。
+ * @param rc522 指向一个变量的指针，该变量将接收RC522模块的句柄。不能为空。
  * @return 返回初始化操作的结果，如果返回ESP_OK表示成功，其他值表示失败。
  */
-esp_err_t rc522_create(const rc522_config_t * config, rc522_handle_t* out_rc522);
+esp_err_t rc522_create(const rc522_config_t * config, rc522_t * rc522);
 
-esp_err_t rc522_register_events(rc522_handle_t rc522, rc522_event_t event, esp_event_handler_t event_handler, void* event_handler_arg);
+esp_err_t rc522_register_events(rc522_t * rc522, rc522_event_t event, esp_event_handler_t event_handler, void * event_handler_arg);
 
-esp_err_t rc522_unregister_events(rc522_handle_t rc522, rc522_event_t event, esp_event_handler_t event_handler);
+esp_err_t rc522_unregister_events(rc522_t * rc522, rc522_event_t event, esp_event_handler_t event_handler);
 
 /**
  * @brief Start to scan tags. If already started, ESP_OK will just be returned. Initialization function had to be
@@ -112,7 +120,7 @@ esp_err_t rc522_unregister_events(rc522_handle_t rc522, rc522_event_t event, esp
  * @param rc522 Handle
  * @return ESP_OK on success
  */
-esp_err_t rc522_start(rc522_handle_t rc522);
+esp_err_t rc522_start(rc522_t * rc522);
 
 /**
  * @brief Start to scan tags. If already started, ESP_OK will just be returned.
@@ -126,13 +134,13 @@ esp_err_t rc522_start(rc522_handle_t rc522);
  * @param rc522 Handle
  * @return ESP_OK on success
  */
-esp_err_t rc522_pause(rc522_handle_t rc522);
+esp_err_t rc522_pause(rc522_t * rc522);
 
 /**
  * @brief Destroy RC522 and free all resources. Cannot be called from event handler.
  * @param rc522 Handle
  */
-esp_err_t rc522_destroy(rc522_handle_t rc522);
+esp_err_t rc522_destroy(rc522_t * rc522);
 
 #ifdef __cplusplus
 }

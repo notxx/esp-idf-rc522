@@ -394,10 +394,11 @@ static uint64_t rc522_sn_to_u64(uint8_t* sn)
  * @param rc522 RC522模块的句柄
  * @param data 需要计算CRC的数据数组
  * @param n 数据数组的长度
- * @param result 存储计算结果的缓冲区（数组长度至少为2）
+ * @param result0 存储计算结果的缓冲区（数组长度至少为2）
+ * @param result1 存储计算结果的缓冲区（数组长度至少为2）
  * @return esp_err_t 返回操作结果，ESP_OK表示成功
  */
-static esp_err_t rc522_calculate_crc(rc522_handle_t rc522, uint8_t * data, uint8_t n, uint8_t (*result)[2]) {
+static esp_err_t rc522_calculate_crc(rc522_handle_t rc522, uint8_t * data, uint8_t n, uint8_t * result0, uint8_t * result1) {
     esp_err_t err = ESP_OK; // 初始化操作结果为成功
     uint8_t i = 255; // 用于延时循环的计数器
     uint8_t nn = 0; // 读取的中断请求寄存器的值
@@ -424,9 +425,9 @@ static esp_err_t rc522_calculate_crc(rc522_handle_t rc522, uint8_t * data, uint8
 
     // 读取CRC结果
     ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_CRC_RESULT_LSB, &tmp)); // 读取CRC结果的低字节
-    (*result)[0] = tmp;
+    *result0 = tmp;
     ESP_ERR_RET_GUARD(rc522_read(rc522, RC522_REG_CRC_RESULT_MSB, &tmp)); // 读取CRC结果的高字节
-    (*result)[1] = tmp;
+    *result1 = tmp;
 
     return ESP_OK; // 返回操作成功
 }
@@ -559,7 +560,7 @@ static esp_err_t rc522_select(rc522_handle_t rc522, uint8_t uid[5]) {
     uint8_t _rxbits;
 
     ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
-    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, data, 7, &data[7])); // TODO
+    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, data, 7, &data[7], &data[8])); // TODO
     ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_STATUS_2, 0x08));
     ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, data, sizeof(data), &_rxbits));
 
@@ -669,7 +670,7 @@ static esp_err_t rc522_stop_picc_communication(rc522_handle_t rc522) {
     uint8_t buf[4];
     memcpy(buf, (uint8_t[])MIFARE_HALT, 2);
     memcpy(buf + 2, (uint8_t[]){ 0x00, 0x00 }, 2);
-    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, buf, 2, buf + 2));
+    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, buf, 2, &buf[2], &buf[3]));
     ESP_ERR_RET_GUARD(rc522_card_write(rc522, RC522_CMD_TRANSCEIVE, buf, 4, &_rxbits));
     // Stop CYPTO1
     // Clear MFCrypto1On bit
@@ -758,7 +759,7 @@ static esp_err_t  rc522_read_block_from_picc(rc522_handle_t rc522, uint8_t block
 	buffer[0] = MIFARE_READ;
 	buffer[1] = blockAddr;
 	// Calculate CRC_A
-    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, buffer, 2, &buffer[2]));
+    ESP_ERR_RET_GUARD(rc522_calculate_crc(rc522, buffer, 2, &buffer[2], &buffer[3]));
 
     // Transmit the buffer and receive the response, validate CRC_A.
     ESP_ERR_RET_GUARD(rc522_write(rc522, RC522_REG_BIT_FRAMING, 0x00));
